@@ -1,49 +1,90 @@
-const { translate } = require("@vitalets/google-translate-api");
+const { translateTextWithGemini } = require("./gemini.service");
 
-function mapLanguageToCode(language) {
+function normalizeLanguage(language) {
   const value = (language || "").toString().trim().toLowerCase();
 
-  switch (value) {
-    case "turkish":
-    case "türkçe":
-      return "tr";
-    case "english":
-    case "ingilizce":
-      return "en";
-    case "german":
-    case "almanca":
-      return "de";
-    case "french":
-    case "fransızca":
-      return "fr";
-    case "italian":
-    case "italyanca":
-      return "it";
-    case "spanish":
-    case "spain":
-    case "ispanyolca":
-      return "es";
-    default:
-      return "auto";
-  }
+  const map = {
+    auto: "Auto Detect",
+    "": "Auto Detect",
+
+    tr: "Turkish",
+    türkçe: "Turkish",
+    turkish: "Turkish",
+
+    en: "English",
+    ingilizce: "English",
+    english: "English",
+
+    de: "German",
+    almanca: "German",
+    german: "German",
+
+    fr: "French",
+    fransızca: "French",
+    french: "French",
+
+    it: "Italian",
+    italyanca: "Italian",
+    italian: "Italian",
+
+    es: "Spanish",
+    ispanyolca: "Spanish",
+    spanish: "Spanish",
+
+    pt: "Portuguese",
+    portekizce: "Portuguese",
+    portuguese: "Portuguese",
+
+    ru: "Russian",
+    rusça: "Russian",
+    russian: "Russian",
+
+    ja: "Japanese",
+    japonca: "Japanese",
+    japanese: "Japanese",
+
+    ko: "Korean",
+    korece: "Korean",
+    korean: "Korean",
+
+    hi: "Hindi",
+    hintçe: "Hindi",
+    hindi: "Hindi",
+
+    ar: "Arabic",
+    arapça: "Arabic",
+    arabic: "Arabic",
+  };
+
+  return {
+    code: value || "auto",
+    label: map[value] || language || "Auto Detect",
+  };
 }
 
-async function translateText(text, sourceLanguage, targetLanguage) {
+async function translateText(text, sourceLanguage, targetLanguage, options = {}) {
   const sourceText = (text || "").toString().trim();
   if (!sourceText) return "";
 
-  const from = mapLanguageToCode(sourceLanguage);
-  const to = mapLanguageToCode(targetLanguage);
+  const source = normalizeLanguage(sourceLanguage);
+  const target = normalizeLanguage(targetLanguage);
 
-  const result = await translate(sourceText, {
-    from,
-    to,
+  if (
+    source.code !== "auto" &&
+    source.label.toLowerCase() === target.label.toLowerCase()
+  ) {
+    return sourceText;
+  }
+
+  return translateTextWithGemini({
+    sourceText,
+    sourceLanguage: source.label,
+    targetLanguage: target.label,
+    expert: options.expert || "General",
   });
-
-  return result.text || "";
 }
 
 module.exports = {
   translateText,
-  mapLanguageToCode,
+  normalizeLanguage,
 };

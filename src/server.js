@@ -10,6 +10,7 @@ const userRoutes = require("./routes/user.routes");
 const translateRoutes = require("./routes/translate.routes");
 const notificationRoutes = require("./routes/notification.routes");
 const subscriptionRoutes = require("./routes/subscription.routes");
+const chatRoutes = require("./routes/chat.routes");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -128,6 +129,7 @@ app.use("/users", userRoutes);
 app.use("/translate", translateRoutes);
 app.use("/notifications", notificationRoutes);
 app.use("/subscription", subscriptionRoutes);
+app.use("/chat", chatRoutes);
 
 app.use((req, res) => {
   res.status(404).json({

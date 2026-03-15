@@ -1,79 +1,89 @@
+const axios = require("axios");
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 
-function getGeminiUrl() {
-  return `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-}
-
-function extractText(data) {
-  const candidates = data?.candidates;
-  if (!Array.isArray(candidates) || candidates.length === 0) return null;
-
-  const parts = candidates[0]?.content?.parts;
-  if (!Array.isArray(parts) || parts.length === 0) return null;
-
-  const text = parts
-    .map((part) => (typeof part?.text === "string" ? part.text : ""))
-    .filter(Boolean)
-    .join("\n")
-    .trim();
-
-  return text || null;
+function extractSystemPrompt(history) {
+  const systemItem = history.find(
+    (item) => item && item.role === "system" && typeof item.text === "string"
+  );
+  return systemItem?.text?.trim() || "";
 }
 
 function mapHistoryToGeminiContents(history) {
-  if (!Array.isArray(history)) return [];
-
   return history
-    .map((item) => {
-      const role = item?.role === "model" ? "model" : "user";
-      const text = (item?.text ?? "").toString().trim();
-
-      if (!text) return null;
-
-      return {
-        role,
-        parts: [{ text }],
-      };
-    })
-    .filter(Boolean);
+    .filter((item) => item && item.role !== "system")
+    .map((item) => ({
+      role: item.role === "model" ? "model" : "user",
+      parts: [{ text: (item.text || "").toString() }],
+    }))
+    .filter((item) => item.parts[0].text.trim().length > 0);
 }
 
 async function sendMessageToGemini(history) {
   if (!GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY missing in .env");
+    throw new Error("GEMINI_API_KEY missing");
   }
 
+  const systemPrompt = extractSystemPrompt(history);
   const contents = mapHistoryToGeminiContents(history);
 
-  const response = await fetch(getGeminiUrl(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": GEMINI_API_KEY,
+  if (!contents.length) {
+    throw new Error("No valid chat content found");
+  }
+
+  const requestBody = {
+    contents,
+    generationConfig: {
+      temperature: 0.7,
+      topK: 32,
+      topP: 1,
+      maxOutputTokens: 512,
     },
-    body: JSON.stringify({
-      contents,
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 700,
+  };
+
+  if (systemPrompt.length > 0) {
+    requestBody.systemInstruction = {
+      parts: [{ text: systemPrompt }],
+    };
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+  try {
+    const response = await axios.post(url, requestBody, {
+      headers: {
+        "Content-Type": "application/json",
       },
-    }),
-  });
+      timeout: 30000,
+    });
 
-  const data = await response.json();
+    const reply =
+      response.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
 
-  if (!response.ok) {
-    throw new Error(data?.error?.message || "Gemini request failed");
+    if (!reply) {
+      console.error(
+        "GEMINI EMPTY RESPONSE:",
+        JSON.stringify(response.data, null, 2)
+      );
+      throw new Error("Empty response from Gemini");
+    }
+
+    return reply;
+  } catch (error) {
+    console.error("GEMINI STATUS:", error.response?.status);
+    console.error(
+      "GEMINI DATA:",
+      JSON.stringify(error.response?.data, null, 2)
+    );
+    console.error("GEMINI MESSAGE:", error.message);
+
+    throw new Error(
+      error.response?.data?.error?.message ||
+        error.message ||
+        "Gemini request failed"
+    );
   }
-
-  const text = extractText(data);
-
-  if (!text) {
-    throw new Error("Empty response from Gemini");
-  }
-
-  return text;
 }
 
 module.exports = {

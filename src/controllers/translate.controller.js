@@ -1,11 +1,14 @@
 const sharp = require("sharp");
 const pool = require("../config/mysql");
 
-const { detectText } = require("../services/ocr.service");
 const {
   translateText: translatePlainText,
 } = require("../services/translate.service");
 const { renderTranslatedImage } = require("../services/imageRender.service");
+const {
+  translatePhotoWithGemini,
+  normalizeGeminiBlocks,
+} = require("../services/gemini.service");
 
 async function getUserIdByFirebaseUid(firebaseUid) {
   const [rows] = await pool.query(
@@ -64,7 +67,8 @@ const translateText = async (req, res) => {
         : await translatePlainText(
             source_text,
             source_language,
-            target_language
+            target_language,
+            { expert }
           );
 
     let translationId = null;
@@ -237,40 +241,43 @@ const translatePhoto = async (req, res) => {
       });
     }
 
-    const ocrBlocks = await detectText(normalizedBuffer);
+    const geminiPhoto = await translatePhotoWithGemini({
+      imageBase64: normalizedBuffer.toString("base64"),
+      mimeType: "image/jpeg",
+      sourceLanguage: source_language,
+      targetLanguage: target_language,
+      expert: expert || "General",
+    });
 
-    const translatedBlocks = [];
-    for (const block of ocrBlocks) {
-      const originalText = (block.text || "").toString().trim();
-      if (!originalText) continue;
+    const sourceTextValue = (geminiPhoto?.source_text || "").toString().trim();
+    const translatedTextValue = (geminiPhoto?.translated_text || "")
+      .toString()
+      .trim();
 
-      const translated = await translatePlainText(
-        originalText,
-        source_language,
-        target_language
-      );
+    let translatedBlocks = normalizeGeminiBlocks(geminiPhoto?.blocks || []);
 
-      translatedBlocks.push({
-        x: block.x,
-        y: block.y,
-        width: block.width,
-        height: block.height,
-        translated_text: translated,
-      });
+    if (translatedBlocks.length === 0 && translatedTextValue) {
+      translatedBlocks = [
+        {
+          x: 0.05,
+          y: 0.05,
+          width: 0.9,
+          height: 0.2,
+          source_text: sourceTextValue,
+          translated_text: translatedTextValue,
+        },
+      ];
     }
-
-    const translatedTextValue = translatedBlocks
-      .map((b) => b.translated_text)
-      .filter(Boolean)
-      .join("\n");
 
     let translatedImageBase64 = null;
 
     try {
-      translatedImageBase64 = await renderTranslatedImage(
-        normalizedBuffer,
-        translatedBlocks
-      );
+      if (translatedBlocks.length > 0) {
+        translatedImageBase64 = await renderTranslatedImage(
+          normalizedBuffer,
+          translatedBlocks
+        );
+      }
     } catch (e) {
       console.error("IMAGE RENDER ERROR:", e);
     }
@@ -299,7 +306,7 @@ const translatePhoto = async (req, res) => {
         [
           userId,
           "photo",
-          "[PHOTO_TEXT]",
+          sourceTextValue || "[PHOTO_TEXT]",
           translatedTextValue || "[NO_TEXT_FOUND]",
           source_language,
           target_language,
@@ -313,9 +320,11 @@ const translatePhoto = async (req, res) => {
 
     return res.json({
       ok: true,
+      source_text: sourceTextValue,
       translated_text: translatedTextValue,
       translation_id: translationId,
       blocks: translatedBlocks,
+      original_image_base64: normalizedBuffer.toString("base64"),
       translated_image_base64: translatedImageBase64,
     });
   } catch (error) {
