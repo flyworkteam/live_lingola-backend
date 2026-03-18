@@ -32,6 +32,17 @@ async function sendMessageToGemini(history) {
     throw new Error("No valid chat content found");
   }
 
+  const languageInstruction = `
+You are a helpful AI assistant.
+
+IMPORTANT RULE:
+Always reply in the same language as the user's latest message.
+If the user writes in Turkish, reply in Turkish.
+If the user writes in English, reply in English.
+Do not switch languages unless the user explicitly asks.
+Keep the entire response in that same language.
+`.trim();
+
   const requestBody = {
     contents,
     generationConfig: {
@@ -42,11 +53,16 @@ async function sendMessageToGemini(history) {
     },
   };
 
-  if (systemPrompt.length > 0) {
-    requestBody.systemInstruction = {
-      parts: [{ text: systemPrompt }],
-    };
-  }
+  requestBody.systemInstruction = {
+    parts: [
+      {
+        text:
+          systemPrompt.length > 0
+            ? `${languageInstruction}\n\n${systemPrompt}`
+            : languageInstruction,
+      },
+    ],
+  };
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
