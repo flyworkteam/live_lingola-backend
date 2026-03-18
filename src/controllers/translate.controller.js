@@ -3,6 +3,7 @@ const pool = require("../config/mysql");
 
 const {
   translateText: translatePlainText,
+  generateTextExamples: generateExamplesFromService,
 } = require("../services/translate.service");
 const { renderTranslatedImage } = require("../services/imageRender.service");
 const {
@@ -25,6 +26,15 @@ async function getUserIdByFirebaseUid(firebaseUid) {
   return rows[0].id;
 }
 
+function isTruthySave(value) {
+  return (
+    value === true ||
+    value === "true" ||
+    value === 1 ||
+    value === "1"
+  );
+}
+
 const translateText = async (req, res) => {
   try {
     const {
@@ -36,7 +46,11 @@ const translateText = async (req, res) => {
       expert,
       translation_type,
       save_to_history,
-    } = req.body;
+      nonce,
+      request_id,
+      seed,
+      force_regenerate,
+    } = req.body || {};
 
     if (!firebase_uid) {
       return res.status(400).json({
@@ -68,17 +82,17 @@ const translateText = async (req, res) => {
             source_text,
             source_language,
             target_language,
-            { expert }
+            {
+              expert,
+              nonce: nonce || request_id || "",
+              seed: seed || "",
+              forceRegenerate: Boolean(force_regenerate),
+            }
           );
 
     let translationId = null;
 
-    if (
-      save_to_history === true ||
-      save_to_history === "true" ||
-      save_to_history === 1 ||
-      save_to_history === "1"
-    ) {
+    if (isTruthySave(save_to_history)) {
       const [result] = await pool.query(
         `
         INSERT INTO translations (
@@ -171,6 +185,50 @@ const translateText = async (req, res) => {
     return res.status(500).json({
       ok: false,
       error: error.message,
+    });
+  }
+};
+
+const generateTextExamples = async (req, res) => {
+  try {
+    const {
+      source_language,
+      target_language,
+      expert,
+      count,
+      nonce,
+      request_id,
+      seed,
+      force_regenerate,
+    } = req.body || {};
+
+    if (!source_language || !target_language) {
+      return res.status(400).json({
+        ok: false,
+        error: "source_language ve target_language zorunlu",
+      });
+    }
+
+    const examples = await generateExamplesFromService({
+      sourceLanguage: source_language,
+      targetLanguage: target_language,
+      expert,
+      count,
+      nonce: nonce || request_id || "",
+      seed: seed || "",
+      forceRegenerate: Boolean(force_regenerate),
+    });
+
+    return res.json({
+      ok: true,
+      examples,
+    });
+  } catch (error) {
+    console.error("GENERATE TEXT EXAMPLES ERROR:", error);
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+      examples: [],
     });
   }
 };
@@ -284,12 +342,7 @@ const translatePhoto = async (req, res) => {
 
     let translationId = null;
 
-    if (
-      save_to_history === true ||
-      save_to_history === "true" ||
-      save_to_history === 1 ||
-      save_to_history === "1"
-    ) {
+    if (isTruthySave(save_to_history)) {
       const [result] = await pool.query(
         `
         INSERT INTO translations (
@@ -561,6 +614,7 @@ const clearFavorites = async (req, res) => {
 
 module.exports = {
   translateText,
+  generateTextExamples,
   translatePhoto,
   toggleFavorite,
   getHistory,

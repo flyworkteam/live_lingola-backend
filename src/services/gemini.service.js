@@ -57,17 +57,119 @@ function normalizeGeminiBlocks(blocks) {
     .filter(Boolean);
 }
 
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    return null;
+  }
+}
+
+function extractJsonText(rawText) {
+  const text = (rawText || "").toString().trim();
+
+  if (!text) return "";
+
+  const cleaned = text
+    .replace(/^```json/i, "")
+    .replace(/^```/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  const firstArray = cleaned.indexOf("[");
+  const lastArray = cleaned.lastIndexOf("]");
+  const firstObject = cleaned.indexOf("{");
+  const lastObject = cleaned.lastIndexOf("}");
+
+  if (firstArray !== -1 && lastArray !== -1 && lastArray > firstArray) {
+    return cleaned.slice(firstArray, lastArray + 1);
+  }
+
+  if (firstObject !== -1 && lastObject !== -1 && lastObject > firstObject) {
+    return cleaned.slice(firstObject, lastObject + 1);
+  }
+
+  return cleaned;
+}
+
+function normalizeExpert(expert) {
+  const value = (expert || "").toString().trim().toLowerCase();
+
+  const map = {
+    general: "General",
+    daily: "Daily Conversation",
+    travel: "Travel",
+    business: "Business",
+    academic: "Academic",
+    medical: "Medical",
+    legal: "Legal",
+    technology: "Technology",
+    marketing: "Marketing",
+    ai: "AI Expert",
+    finance: "Finance",
+  };
+
+  return map[value] || expert || "General";
+}
+
+function buildExpertTopicGuide(expert) {
+  const normalized = normalizeExpert(expert);
+
+  const guides = {
+    General:
+      "Use practical, natural, general-purpose topics that a typical translation app user may type.",
+    "Daily Conversation":
+      "Focus on greetings, daily routines, food, shopping, friends, family, weather, and casual everyday communication.",
+    Travel:
+      "Focus on airport, hotel, booking, directions, transportation, restaurants, sightseeing, reservations, and tourist communication.",
+    Business:
+      "Focus on meetings, schedules, presentations, deadlines, office communication, negotiation, email-like business phrasing, and teamwork.",
+    Academic:
+      "Focus on studying, classes, homework, lectures, research, presentations, exams, and educational communication.",
+    Medical:
+      "Focus on appointments, symptoms, pharmacy, medicine, doctor communication, emergency needs, and basic health-related situations.",
+    Legal:
+      "Focus on documents, permissions, procedures, forms, appointments, contracts, legal office interactions, and official communication.",
+    Technology:
+      "Focus on apps, devices, software, settings, internet, troubleshooting, coding, digital products, and user-tech interactions.",
+    Marketing:
+      "Focus on campaigns, branding, product promotion, customer communication, social media captions, ad messaging, and sales-friendly language.",
+    "AI Expert":
+      "Focus on prompts, AI tools, automation, model outputs, productivity workflows, content generation, and AI-assisted work language.",
+    Finance:
+      "Focus on pricing, invoices, subscriptions, banking, payments, budgeting, financial planning, and expenses.",
+  };
+
+  return guides[normalized] || guides.General;
+}
+
 async function callGemini({
   parts,
   responseMimeType = "text/plain",
   temperature = 0.2,
+  topP,
+  topK,
+  maxOutputTokens,
 }) {
   ensureGeminiConfig();
+
+  const generationConfig = {
+    temperature,
+    responseMimeType,
+  };
+
+  if (typeof topP === "number") generationConfig.topP = topP;
+  if (typeof topK === "number") generationConfig.topK = topK;
+  if (typeof maxOutputTokens === "number") {
+    generationConfig.maxOutputTokens = maxOutputTokens;
+  }
 
   const response = await fetch(getGeminiUrl(), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "Cache-Control": "no-cache",
+      Pragma: "no-cache",
     },
     body: JSON.stringify({
       contents: [
@@ -76,10 +178,7 @@ async function callGemini({
           parts,
         },
       ],
-      generationConfig: {
-        temperature,
-        responseMimeType,
-      },
+      generationConfig,
     }),
   });
 
@@ -106,9 +205,15 @@ async function translateTextWithGemini({
   sourceLanguage,
   targetLanguage,
   expert,
+  expertGuide,
+  nonce,
+  seed,
+  forceRegenerate,
 }) {
   const cleanText = (sourceText || "").toString().trim();
   if (!cleanText) return "";
+
+  const resolvedExpert = normalizeExpert(expert);
 
   const prompt = `
 You are a professional translation engine.
@@ -122,7 +227,12 @@ Rules:
 - Do not add notes, explanations, labels, or alternatives.
 - Preserve meaning, tone, punctuation, emojis, and line breaks.
 - If the text is already in the target language, still return a polished equivalent in the target language.
-- Domain/context: ${expert || "General"}.
+- The final response must always be in ${targetLanguage}.
+- Domain/context: ${resolvedExpert}.
+- Domain guidance: ${expertGuide || buildExpertTopicGuide(resolvedExpert)}.
+- Fresh generation requested: ${forceRegenerate ? "yes" : "no"}.
+- Request nonce: ${nonce || "none"}.
+- Request seed: ${seed || "none"}.
 
 Text:
 ${cleanText}
@@ -131,7 +241,10 @@ ${cleanText}
   const translated = await callGemini({
     parts: [{ text: prompt }],
     responseMimeType: "text/plain",
-    temperature: 0.1,
+    temperature: 0.25,
+    topP: 0.95,
+    topK: 40,
+    maxOutputTokens: 2048,
   });
 
   return translated.trim();
@@ -144,6 +257,8 @@ async function translatePhotoWithGemini({
   targetLanguage,
   expert,
 }) {
+  const resolvedExpert = normalizeExpert(expert);
+
   const prompt = `
 You are an OCR + layout + translation engine.
 
@@ -185,7 +300,7 @@ Important rules:
   "blocks": []
 }
 
-Domain/context: ${expert || "General"}
+Domain/context: ${resolvedExpert}
   `.trim();
 
   const raw = await callGemini({
@@ -200,10 +315,13 @@ Domain/context: ${expert || "General"}
     ],
     responseMimeType: "application/json",
     temperature: 0.1,
+    topP: 0.9,
+    topK: 32,
+    maxOutputTokens: 4096,
   });
 
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(extractJsonText(raw));
 
     const sourceText = (parsed?.source_text || "").toString().trim();
     const translatedText = (parsed?.translated_text || "").toString().trim();
@@ -227,7 +345,7 @@ Domain/context: ${expert || "General"}
       translated_text: translatedText,
       blocks,
     };
-  } catch (error) {
+  } catch (_) {
     throw new Error("Gemini photo JSON parse edilemedi");
   }
 }
@@ -236,28 +354,53 @@ async function generateTextExamplesWithGemini({
   sourceLanguage,
   targetLanguage,
   expert,
+  expertGuide,
   count = 2,
+  nonce,
+  seed,
+  forceRegenerate,
 }) {
+  const resolvedExpert = normalizeExpert(expert);
+  const safeCount = Math.max(1, Math.min(Number(count) || 2, 10));
+
   const prompt = `
 You are generating example phrases for a mobile translation app.
 
 Task:
-Generate ${count} short and natural example texts for a translation screen.
+Generate ${safeCount} short, natural, and fresh example texts for a translation screen.
 
-Rules:
-- Return ONLY valid JSON.
-- Do not wrap JSON in markdown.
-- Output must be an array.
-- Each item must have exactly:
-  - "title": the example text in ${sourceLanguage || "source language"}
-  - "subtitle": the translated version of that same text in ${targetLanguage || "target language"}
-- Do not use category labels.
-- Keep the examples realistic, useful, and mobile-app friendly.
-- Avoid harmful, sexual, illegal, or sensitive content.
-- Keep each title reasonably short.
-- Use domain/context: ${expert || "General"}.
-- The examples should feel different from each other.
-- The examples are for a translation screen, so make them look like input text a user would type.
+Language rules:
+- "title" must be written in ${sourceLanguage || "the source language"}.
+- "subtitle" must be the meaning-equivalent translation in ${targetLanguage || "the target language"}.
+- The answer must respect the requested languages exactly.
+- If the source and target languages are the same, still write natural matching examples in that same language.
+
+Expert/domain rules:
+- Selected expert: ${resolvedExpert}
+- Domain guidance: ${expertGuide || buildExpertTopicGuide(resolvedExpert)}
+
+Freshness rules:
+- Generate new examples for this request.
+- Avoid repeating generic translation app clichés unless necessary.
+- Avoid repeating the same structure across all items.
+- The examples should clearly differ from each other.
+- Fresh generation requested: ${forceRegenerate ? "yes" : "no"}.
+- Request nonce: ${nonce || "none"}.
+- Request seed: ${seed || "none"}.
+
+Safety and quality rules:
+- Avoid harmful, sexual, illegal, extremist, hateful, or sensitive content.
+- Keep each title reasonably short and realistic.
+- Make them look like text a real user would type into a translation app.
+- Do not include numbering or labels.
+- Do not include markdown.
+
+Return ONLY valid JSON.
+Do not wrap JSON in markdown.
+Output must be an array.
+Each item must have exactly:
+- "title"
+- "subtitle"
 
 Example output:
 [
@@ -275,15 +418,14 @@ Example output:
   const raw = await callGemini({
     parts: [{ text: prompt }],
     responseMimeType: "application/json",
-    temperature: 0.9,
+    temperature: 1.1,
+    topP: 0.98,
+    topK: 50,
+    maxOutputTokens: 2048,
   });
 
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (_) {
-    throw new Error("Gemini examples JSON parse edilemedi");
-  }
+  const parsed =
+    safeJsonParse(extractJsonText(raw)) || safeJsonParse(raw);
 
   if (!Array.isArray(parsed)) {
     throw new Error("Gemini examples formatı geçersiz");
@@ -302,7 +444,7 @@ Example output:
       };
     })
     .filter(Boolean)
-    .slice(0, count);
+    .slice(0, safeCount);
 
   if (!normalized.length) {
     throw new Error("Gemini örnek üretmedi");
@@ -316,4 +458,6 @@ module.exports = {
   translatePhotoWithGemini,
   normalizeGeminiBlocks,
   generateTextExamplesWithGemini,
+  normalizeExpert,
+  buildExpertTopicGuide,
 };

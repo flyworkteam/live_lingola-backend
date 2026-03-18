@@ -4,6 +4,7 @@ const upload = require("../middlewares/upload.middleware");
 
 const {
   translateText,
+  generateTextExamples,
   toggleFavorite,
   getHistory,
   getFavorites,
@@ -14,6 +15,7 @@ const {
 } = require("../controllers/translate.controller");
 
 router.post("/text", translateText);
+router.post("/text-examples", generateTextExamples);
 router.post("/photo", upload.single("image"), translatePhoto);
 router.post("/favorite", toggleFavorite);
 
