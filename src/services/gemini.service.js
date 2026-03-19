@@ -34,8 +34,22 @@ function normalizeGeminiBlocks(blocks) {
 
   return blocks
     .map((block) => {
-      const sourceText = (block?.source_text || "").toString().trim();
-      const translatedText = (block?.translated_text || "").toString().trim();
+      const sourceText = (
+        block?.source_text ||
+        block?.sourceText ||
+        block?.text ||
+        ""
+      )
+        .toString()
+        .trim();
+
+      const translatedText = (
+        block?.translated_text ||
+        block?.translatedText ||
+        ""
+      )
+        .toString()
+        .trim();
 
       const x = clamp01(block?.x, 0);
       const y = clamp01(block?.y, 0);
@@ -54,7 +68,11 @@ function normalizeGeminiBlocks(blocks) {
         height,
       };
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .sort((a, b) => {
+      if (Math.abs(a.y - b.y) > 0.01) return a.y - b.y;
+      return a.x - b.x;
+    });
 }
 
 function safeJsonParse(text) {
@@ -67,26 +85,31 @@ function safeJsonParse(text) {
 
 function extractJsonText(rawText) {
   const text = (rawText || "").toString().trim();
-
   if (!text) return "";
 
   const cleaned = text
-    .replace(/^```json/i, "")
-    .replace(/^```/i, "")
-    .replace(/```$/i, "")
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
     .trim();
 
-  const firstArray = cleaned.indexOf("[");
-  const lastArray = cleaned.lastIndexOf("]");
-  const firstObject = cleaned.indexOf("{");
-  const lastObject = cleaned.lastIndexOf("}");
-
-  if (firstArray !== -1 && lastArray !== -1 && lastArray > firstArray) {
-    return cleaned.slice(firstArray, lastArray + 1);
+  if (
+    (cleaned.startsWith("{") && cleaned.endsWith("}")) ||
+    (cleaned.startsWith("[") && cleaned.endsWith("]"))
+  ) {
+    return cleaned;
   }
 
-  if (firstObject !== -1 && lastObject !== -1 && lastObject > firstObject) {
-    return cleaned.slice(firstObject, lastObject + 1);
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    return cleaned.slice(firstBrace, lastBrace + 1);
+  }
+
+  const firstBracket = cleaned.indexOf("[");
+  const lastBracket = cleaned.lastIndexOf("]");
+  if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+    return cleaned.slice(firstBracket, lastBracket + 1);
   }
 
   return cleaned;
@@ -250,6 +273,101 @@ ${cleanText}
   return translated.trim();
 }
 
+async function translatePhotoBlocksWithGemini({
+  blocks,
+  sourceLanguage,
+  targetLanguage,
+  expert,
+}) {
+  const safeBlocks = Array.isArray(blocks)
+    ? blocks
+        .map((b, index) => ({
+          index,
+          source_text: (b?.source_text || b?.text || "").toString().trim(),
+        }))
+        .filter((b) => b.source_text)
+    : [];
+
+  if (!safeBlocks.length) {
+    return [];
+  }
+
+  const resolvedExpert = normalizeExpert(expert);
+
+  const prompt = `
+You are a professional translation engine for OCR text blocks.
+
+Task:
+Translate each OCR text block from ${sourceLanguage || "auto-detect"} to ${targetLanguage}.
+
+Critical rules:
+- Return ONLY valid JSON.
+- Do not wrap JSON in markdown.
+- Preserve the exact block count.
+- Preserve the exact index values.
+- Do not merge blocks.
+- Do not reorder blocks.
+- Do not omit blocks.
+- Translate each block independently.
+- The translated text must match the meaning of the source block.
+- Keep punctuation, numbers, emojis, and line intent when possible.
+- Final translated text must always be in ${targetLanguage}.
+
+Return EXACTLY this JSON array shape:
+[
+  {
+    "index": 0,
+    "translated_text": "..."
+  }
+]
+
+Domain/context: ${resolvedExpert}
+Domain guidance: ${buildExpertTopicGuide(resolvedExpert)}
+
+OCR blocks:
+${JSON.stringify(safeBlocks, null, 2)}
+  `.trim();
+
+  const raw = await callGemini({
+    parts: [{ text: prompt }],
+    responseMimeType: "application/json",
+    temperature: 0.2,
+    topP: 0.9,
+    topK: 32,
+    maxOutputTokens: 4096,
+  });
+
+  const parsed =
+    safeJsonParse(extractJsonText(raw)) || safeJsonParse(raw);
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("Gemini photo blocks formatı geçersiz");
+  }
+
+  const translatedMap = new Map();
+
+  for (const item of parsed) {
+    const index = Number(item?.index);
+    const translatedText = (item?.translated_text || "")
+      .toString()
+      .trim();
+
+    if (Number.isInteger(index)) {
+      translatedMap.set(index, translatedText);
+    }
+  }
+
+  return blocks.map((b, index) => ({
+    source_text: (b?.source_text || b?.text || "").toString().trim(),
+    translated_text:
+      translatedMap.get(index) ||
+      (b?.source_text || b?.text || "").toString().trim(),
+    x: clamp01(b?.x, 0),
+    y: clamp01(b?.y, 0),
+    width: clamp01(b?.width, 0),
+    height: clamp01(b?.height, 0),
+  }));
+}
 async function translatePhotoWithGemini({
   imageBase64,
   mimeType,
@@ -259,7 +377,53 @@ async function translatePhotoWithGemini({
 }) {
   const resolvedExpert = normalizeExpert(expert);
 
-  const prompt = `
+  async function requestPhotoJson({ compactMode = false }) {
+    const prompt = compactMode
+      ? `
+You are an OCR + translation engine.
+
+Task:
+1. Read visible text in the image.
+2. Group nearby text into a SMALL number of meaningful regions.
+3. Translate from ${sourceLanguage || "auto-detect"} to ${targetLanguage}.
+4. Return ONLY valid JSON.
+5. Do not wrap JSON in markdown.
+
+Hard limits:
+- Return at most 12 blocks.
+- Merge nearby labels that belong together.
+- Prefer compact output over detailed segmentation.
+- Coordinates must be normalized between 0 and 1.
+
+Return EXACTLY:
+{
+  "source_text": "all detected source text joined with line breaks",
+  "translated_text": "all translated text joined with line breaks",
+  "blocks": [
+    {
+      "source_text": "original text block",
+      "translated_text": "translated text block",
+      "x": 0.10,
+      "y": 0.15,
+      "width": 0.30,
+      "height": 0.06
+    }
+  ]
+}
+
+Important:
+- Final translated text must always be in ${targetLanguage}.
+- Domain/context: ${resolvedExpert}
+- Domain guidance: ${buildExpertTopicGuide(resolvedExpert)}
+
+If there is no visible text, return:
+{
+  "source_text": "",
+  "translated_text": "",
+  "blocks": []
+}
+      `.trim()
+      : `
 You are an OCR + layout + translation engine.
 
 Your task:
@@ -273,6 +437,11 @@ Your task:
 8. width and height are the size of the text block.
 9. Keep reading order natural: top-to-bottom, left-to-right.
 10. Prefer multiple small blocks over one giant block when the image has separate text areas.
+
+Hard limits:
+- Return at most 20 blocks.
+- If there are too many tiny UI labels, merge nearby ones.
+- Prefer complete valid JSON over excessive detail.
 
 Return JSON in exactly this shape:
 {
@@ -291,63 +460,85 @@ Return JSON in exactly this shape:
 }
 
 Important rules:
-- If the image has many UI labels, buttons, headings, or separate lines, return separate blocks.
+- If the image has many UI labels, buttons, headings, or separate lines, return separate blocks only when necessary.
 - Do NOT merge the whole image into one block unless absolutely necessary.
-- If there is no visible text, return:
+- Final translated text must always be in ${targetLanguage}.
+- Domain/context: ${resolvedExpert}
+- Domain guidance: ${buildExpertTopicGuide(resolvedExpert)}
+
+If there is no visible text, return:
 {
   "source_text": "",
   "translated_text": "",
   "blocks": []
 }
+      `.trim();
 
-Domain/context: ${resolvedExpert}
-  `.trim();
-
-  const raw = await callGemini({
-    parts: [
-      {
-        inlineData: {
-          mimeType: mimeType || "image/jpeg",
-          data: imageBase64,
-        },
-      },
-      { text: prompt },
-    ],
-    responseMimeType: "application/json",
-    temperature: 0.1,
-    topP: 0.9,
-    topK: 32,
-    maxOutputTokens: 4096,
-  });
-
-  try {
-    const parsed = JSON.parse(extractJsonText(raw));
-
-    const sourceText = (parsed?.source_text || "").toString().trim();
-    const translatedText = (parsed?.translated_text || "").toString().trim();
-    let blocks = normalizeGeminiBlocks(parsed?.blocks || []);
-
-    if (blocks.length === 0 && translatedText) {
-      blocks = [
+    const raw = await callGemini({
+      parts: [
         {
-          source_text: sourceText,
-          translated_text: translatedText,
-          x: 0.05,
-          y: 0.05,
-          width: 0.9,
-          height: 0.2,
+          inlineData: {
+            mimeType: mimeType || "image/jpeg",
+            data: imageBase64,
+          },
         },
-      ];
+        { text: prompt },
+      ],
+      responseMimeType: "application/json",
+      temperature: compactMode ? 0.1 : 0.15,
+      topP: 0.9,
+      topK: 32,
+      maxOutputTokens: compactMode ? 2048 : 3072,
+    });
+
+    const extracted = extractJsonText(raw);
+    const parsed = safeJsonParse(extracted) || safeJsonParse(raw);
+
+    if (!parsed || typeof parsed !== "object") {
+      console.error("GEMINI PHOTO RAW RESPONSE:", raw);
+      console.error("GEMINI PHOTO EXTRACTED JSON:", extracted);
+      return null;
     }
 
-    return {
-      source_text: sourceText,
-      translated_text: translatedText,
-      blocks,
-    };
-  } catch (_) {
+    return parsed;
+  }
+
+  let parsed = await requestPhotoJson({ compactMode: false });
+
+  if (!parsed) {
+    parsed = await requestPhotoJson({ compactMode: true });
+  }
+
+  if (!parsed) {
     throw new Error("Gemini photo JSON parse edilemedi");
   }
+
+  const sourceText = (parsed?.source_text || "").toString().trim();
+  const translatedText = (parsed?.translated_text || "").toString().trim();
+  let blocks = normalizeGeminiBlocks(parsed?.blocks || []);
+
+  if (blocks.length > 20) {
+    blocks = blocks.slice(0, 20);
+  }
+
+  if (blocks.length === 0 && translatedText) {
+    blocks = [
+      {
+        source_text: sourceText,
+        translated_text: translatedText,
+        x: 0.05,
+        y: 0.05,
+        width: 0.9,
+        height: 0.2,
+      },
+    ];
+  }
+
+  return {
+    source_text: sourceText,
+    translated_text: translatedText,
+    blocks,
+  };
 }
 
 async function generateTextExamplesWithGemini({
@@ -455,6 +646,7 @@ Example output:
 
 module.exports = {
   translateTextWithGemini,
+  translatePhotoBlocksWithGemini,
   translatePhotoWithGemini,
   normalizeGeminiBlocks,
   generateTextExamplesWithGemini,

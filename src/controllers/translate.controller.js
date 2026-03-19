@@ -6,11 +6,12 @@ const {
   generateTextExamples: generateExamplesFromService,
 } = require("../services/translate.service");
 const { renderTranslatedImage } = require("../services/imageRender.service");
+const { detectText } = require("../services/ocr.service");
 const {
   translatePhotoWithGemini,
   normalizeGeminiBlocks,
 } = require("../services/gemini.service");
-
+ 
 async function getUserIdByFirebaseUid(firebaseUid) {
   const [rows] = await pool.query(
     `
@@ -27,12 +28,59 @@ async function getUserIdByFirebaseUid(firebaseUid) {
 }
 
 function isTruthySave(value) {
-  return (
-    value === true ||
-    value === "true" ||
-    value === 1 ||
-    value === "1"
-  );
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
+function clamp01(value, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+function normalizePhotoBlock(block) {
+  const sourceText = (block?.source_text || block?.text || "").toString().trim();
+  const translatedText = (block?.translated_text || "").toString().trim();
+
+  return {
+    source_text: sourceText,
+    translated_text: translatedText,
+    x: clamp01(block?.x, 0),
+    y: clamp01(block?.y, 0),
+    width: clamp01(block?.width, 0),
+    height: clamp01(block?.height, 0),
+  };
+}
+
+function cleanupPhotoBlocks(blocks) {
+  if (!Array.isArray(blocks)) return [];
+
+  return blocks
+    .map(normalizePhotoBlock)
+    .filter((b) => {
+      if (!b.source_text && !b.translated_text) return false;
+      if (b.width <= 0 || b.height <= 0) return false;
+      if (b.width >= 0.95 && b.height >= 0.95) return false;
+
+      const longSingleLineGarbage =
+        (b.source_text || "").length > 180 && b.height < 0.09 && b.width > 0.75;
+
+      if (longSingleLineGarbage) return false;
+
+      return true;
+    })
+    .map((b) => ({
+      ...b,
+      x: Math.max(0, b.x - 0.002),
+      y: Math.max(0, b.y - 0.002),
+      width: Math.min(1 - Math.max(0, b.x - 0.002), b.width + 0.004),
+      height: Math.min(1 - Math.max(0, b.y - 0.002), b.height + 0.004),
+    }))
+    .sort((a, b) => {
+      if (Math.abs(a.y - b.y) > 0.01) return a.y - b.y;
+      return a.x - b.x;
+    });
 }
 
 const translateText = async (req, res) => {
@@ -119,60 +167,6 @@ const translateText = async (req, res) => {
       );
 
       translationId = result.insertId;
-
-      const [rows] = await pool.query(
-        `
-        SELECT id, usage_count
-        FROM frequently_used_terms
-        WHERE user_id = ?
-          AND source_text = ?
-          AND translated_text = ?
-          AND source_language = ?
-          AND target_language = ?
-        LIMIT 1
-        `,
-        [
-          userId,
-          source_text,
-          translatedTextValue,
-          source_language,
-          target_language,
-        ]
-      );
-
-      if (rows.length > 0) {
-        await pool.query(
-          `
-          UPDATE frequently_used_terms
-          SET usage_count = usage_count + 1,
-              last_used_at = CURRENT_TIMESTAMP,
-              updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-          `,
-          [rows[0].id]
-        );
-      } else {
-        await pool.query(
-          `
-          INSERT INTO frequently_used_terms (
-            user_id,
-            source_text,
-            translated_text,
-            source_language,
-            target_language,
-            usage_count
-          ) VALUES (?, ?, ?, ?, ?, ?)
-          `,
-          [
-            userId,
-            source_text,
-            translatedTextValue,
-            source_language,
-            target_language,
-            1,
-          ]
-        );
-      }
     }
 
     return res.json({
@@ -288,9 +282,10 @@ const translatePhoto = async (req, res) => {
 
     let normalizedBuffer;
     try {
-      normalizedBuffer = await sharp(req.file.buffer)
-        .jpeg({ quality: 92 })
-        .toBuffer();
+normalizedBuffer = await sharp(req.file.buffer)
+  .resize({ width: 1400, withoutEnlargement: true })
+  .jpeg({ quality: 88 })
+  .toBuffer();
     } catch (e) {
       console.error("PHOTO NORMALIZE ERROR:", e);
       return res.status(400).json({
@@ -326,6 +321,10 @@ const translatePhoto = async (req, res) => {
         },
       ];
     }
+
+    console.log("PHOTO FINAL SOURCE TEXT:", sourceTextValue);
+    console.log("PHOTO FINAL TRANSLATED TEXT:", translatedTextValue);
+    console.log("PHOTO FINAL BLOCKS:", translatedBlocks);
 
     let translatedImageBase64 = null;
 
@@ -491,7 +490,7 @@ const getFavorites = async (req, res) => {
       SELECT *
       FROM translations
       WHERE user_id = ? AND is_favorite = 1
-      ORDER BY created_at DESC
+      ORDER BY updated_at DESC, created_at DESC
       `,
       [userId]
     );
@@ -523,10 +522,12 @@ const getFrequentlyUsed = async (req, res) => {
 
     const [rows] = await pool.query(
       `
-      SELECT *
-      FROM frequently_used_terms
+      SELECT source_text, translated_text, source_language, target_language, COUNT(*) AS usage_count
+      FROM translations
       WHERE user_id = ?
-      ORDER BY usage_count DESC, last_used_at DESC
+      GROUP BY source_text, translated_text, source_language, target_language
+      ORDER BY usage_count DESC, MAX(created_at) DESC
+      LIMIT 20
       `,
       [userId]
     );
@@ -566,7 +567,6 @@ const clearHistory = async (req, res) => {
 
     return res.json({
       ok: true,
-      message: "History cleared successfully",
     });
   } catch (error) {
     console.error("CLEAR HISTORY ERROR:", error);
@@ -592,16 +592,14 @@ const clearFavorites = async (req, res) => {
     await pool.query(
       `
       UPDATE translations
-      SET is_favorite = 0,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ? AND is_favorite = 1
+      SET is_favorite = 0, updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ?
       `,
       [userId]
     );
 
     return res.json({
       ok: true,
-      message: "Favorites cleared successfully",
     });
   } catch (error) {
     console.error("CLEAR FAVORITES ERROR:", error);

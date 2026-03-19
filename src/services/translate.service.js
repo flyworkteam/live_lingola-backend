@@ -183,16 +183,16 @@ async function generateTextExamples(options = {}) {
   const expert = normalizeExpert(options.expert);
   const count = Math.max(1, Math.min(Number(options.count) || 2, 10));
 
-return generateTextExamplesWithGemini({
-  sourceLanguage: source.label,
-  targetLanguage: target.label,
-  expert,
-  expertGuide: buildExpertTopicGuide(expert),
-  count,
-  nonce: options.nonce || "",
-  seed: options.seed || "",
-  forceRegenerate: Boolean(options.forceRegenerate),
-});
+  return generateTextExamplesWithGemini({
+    sourceLanguage: source.label,
+    targetLanguage: target.label,
+    expert,
+    expertGuide: buildExpertTopicGuide(expert),
+    count,
+    nonce: options.nonce || "",
+    seed: options.seed || "",
+    forceRegenerate: Boolean(options.forceRegenerate),
+  });
 }
 
 module.exports = {
