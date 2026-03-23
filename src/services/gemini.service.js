@@ -488,7 +488,7 @@ If there is no visible text, return:
       temperature: compactMode ? 0.1 : 0.15,
       topP: 0.9,
       topK: 32,
-      maxOutputTokens: compactMode ? 2048 : 3072,
+      maxOutputTokens: compactMode ? 4096 : 6144,
     });
 
     const extracted = extractJsonText(raw);

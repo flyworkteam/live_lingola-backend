@@ -52,9 +52,6 @@ router.post("/sync", async (req, res) => {
 
       console.log("SYNC EXISTING USER BEFORE UPDATE:", user);
 
-      // ÖNEMLİ:
-      // Kullanıcı profil ayarlarından adı/fotoğrafı değiştirdiyse
-      // sync bunları ezmemeli.
       const nextEmail = email ?? user.email ?? null;
       const nextName =
         cleanString(user.name) !== null ? cleanString(user.name) : name;
@@ -326,7 +323,6 @@ router.delete("/firebase/:firebaseUid", async (req, res) => {
     console.log("DELETE USER REQUEST FIREBASE UID:", firebaseUid);
 
     if (!firebaseUid) {
-      connection.release();
       return res.status(400).json({
         ok: false,
         error: "firebaseUid is required",
@@ -357,23 +353,7 @@ router.delete("/firebase/:firebaseUid", async (req, res) => {
 
     console.log("DELETE USER FOUND:", { userId, firebaseUid });
 
-    await connection.query(
-      `
-      DELETE FROM translations
-      WHERE user_id = ?
-      `,
-      [userId]
-    );
-
-    await connection.query(
-      `
-      DELETE FROM frequently_used_terms
-      WHERE user_id = ?
-      `,
-      [userId]
-    );
-
-    await connection.query(
+    const [deleteResult] = await connection.query(
       `
       DELETE FROM users
       WHERE firebase_uid = ?
@@ -381,11 +361,13 @@ router.delete("/firebase/:firebaseUid", async (req, res) => {
       [firebaseUid]
     );
 
+    console.log("DELETE USER RESULT:", deleteResult);
+
     await connection.commit();
 
     return res.json({
       ok: true,
-      message: "User and related data deleted successfully",
+      message: "User and all related data deleted successfully",
     });
   } catch (error) {
     await connection.rollback();

@@ -12,6 +12,10 @@ const notificationRoutes = require("./routes/notification.routes");
 const subscriptionRoutes = require("./routes/subscription.routes");
 const chatRoutes = require("./routes/chat.routes");
 
+// LOG İÇİN EKLENDİ
+const logRoutes = require("./routes/log.routes");
+const { createLog } = require("./services/log.service");
+
 const app = express();
 const PORT = process.env.PORT || 4000;
 
@@ -131,16 +135,59 @@ app.use("/notifications", notificationRoutes);
 app.use("/subscription", subscriptionRoutes);
 app.use("/chat", chatRoutes);
 
-app.use((req, res) => {
+// LOG ROUTE EKLENDİ
+app.use("/logs", logRoutes);
+
+app.use(async (req, res) => {
+  try {
+    await createLog({
+      source: "backend",
+      level: "warning",
+      type: "route_not_found",
+      message: "Route not found",
+      details: {
+        url: req.originalUrl,
+        method: req.method,
+      },
+      endpoint: req.originalUrl,
+      method: req.method,
+      ip: req.ip,
+      platform: "backend",
+    });
+  } catch (_) {}
+
   res.status(404).json({
     ok: false,
     error: "Route not found",
   });
 });
 
-app.use((error, req, res, next) => {
+app.use(async (error, req, res, next) => {
   console.error("SERVER ERROR:", error);
-  res.status(500).json({
+
+  try {
+    await createLog({
+      source: "backend",
+      level: "critical",
+      type: error.type || "server_error",
+      message: error.message || "Internal server error",
+      stack: error.stack || "",
+      details: {
+        body: req.body || {},
+        query: req.query || {},
+        params: req.params || {},
+      },
+      userId: req.user?.id || null,
+      endpoint: req.originalUrl || null,
+      method: req.method || null,
+      ip: req.ip || null,
+      platform: "backend",
+    });
+  } catch (logError) {
+    console.error("LOG WRITE ERROR:", logError);
+  }
+
+  res.status(error.statusCode || 500).json({
     ok: false,
     error: error.message || "Internal server error",
   });
