@@ -166,6 +166,71 @@ function buildExpertTopicGuide(expert) {
   return guides[normalized] || guides.General;
 }
 
+function normalizeDetectedLanguageCode(value, fallback = "") {
+  const raw = (value || "").toString().trim().toLowerCase();
+  if (!raw) return fallback;
+
+  const map = {
+    tr: "tr",
+    turkish: "tr",
+    türkçe: "tr",
+
+    en: "en",
+    english: "en",
+    ingilizce: "en",
+
+    de: "de",
+    german: "de",
+    deutsch: "de",
+    almanca: "de",
+
+    fr: "fr",
+    french: "fr",
+    français: "fr",
+    fransızca: "fr",
+
+    es: "es",
+    spanish: "es",
+    español: "es",
+    ispanyolca: "es",
+
+    it: "it",
+    italian: "it",
+    italiano: "it",
+    italyanca: "it",
+
+    pt: "pt",
+    portuguese: "pt",
+    português: "pt",
+    portekizce: "pt",
+
+    ru: "ru",
+    russian: "ru",
+    русский: "ru",
+    rusça: "ru",
+
+    ar: "ar",
+    arabic: "ar",
+    العربية: "ar",
+    arapça: "ar",
+
+    hi: "hi",
+    hindi: "hi",
+
+    ja: "ja",
+    japanese: "ja",
+    日本語: "ja",
+    japonca: "ja",
+
+    ko: "ko",
+    korean: "ko",
+    한국어: "ko",
+    korece: "ko",
+  };
+
+  return map[raw] || raw || fallback;
+}
+
 async function callGemini({
   parts,
   responseMimeType = "text/plain",
@@ -234,7 +299,12 @@ async function translateTextWithGemini({
   forceRegenerate,
 }) {
   const cleanText = (sourceText || "").toString().trim();
-  if (!cleanText) return "";
+  if (!cleanText) {
+    return {
+      translated_text: "",
+      detected_source_language: normalizeDetectedLanguageCode(sourceLanguage),
+    };
+  }
 
   const resolvedExpert = normalizeExpert(expert);
 
@@ -245,32 +315,53 @@ Task:
 Translate the given text from ${sourceLanguage || "auto-detect"} to ${targetLanguage}.
 
 Rules:
-- Return only the translated text.
-- Do not add quotation marks.
+- Return ONLY valid JSON.
+- Do not wrap JSON in markdown.
 - Do not add notes, explanations, labels, or alternatives.
 - Preserve meaning, tone, punctuation, emojis, and line breaks.
 - If the text is already in the target language, still return a polished equivalent in the target language.
 - The final response must always be in ${targetLanguage}.
+- Also detect the true source language of the input text.
+- "detected_source_language" must be a lowercase language code like: tr, en, de, fr, es, it, pt, ru, ar, hi, ja, ko.
 - Domain/context: ${resolvedExpert}.
 - Domain guidance: ${expertGuide || buildExpertTopicGuide(resolvedExpert)}.
 - Fresh generation requested: ${forceRegenerate ? "yes" : "no"}.
 - Request nonce: ${nonce || "none"}.
 - Request seed: ${seed || "none"}.
 
+Return EXACTLY this JSON shape:
+{
+  "translated_text": "...",
+  "detected_source_language": "tr"
+}
+
 Text:
 ${cleanText}
   `.trim();
 
-  const translated = await callGemini({
+  const raw = await callGemini({
     parts: [{ text: prompt }],
-    responseMimeType: "text/plain",
+    responseMimeType: "application/json",
     temperature: 0.25,
     topP: 0.95,
     topK: 40,
     maxOutputTokens: 2048,
   });
 
-  return translated.trim();
+  const parsed =
+    safeJsonParse(extractJsonText(raw)) || safeJsonParse(raw);
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Gemini text translate formatı geçersiz");
+  }
+
+  return {
+    translated_text: (parsed?.translated_text || "").toString().trim(),
+    detected_source_language: normalizeDetectedLanguageCode(
+      parsed?.detected_source_language,
+      normalizeDetectedLanguageCode(sourceLanguage)
+    ),
+  };
 }
 
 async function translatePhotoBlocksWithGemini({
@@ -289,7 +380,10 @@ async function translatePhotoBlocksWithGemini({
     : [];
 
   if (!safeBlocks.length) {
-    return [];
+    return {
+      detected_source_language: normalizeDetectedLanguageCode(sourceLanguage),
+      blocks: [],
+    };
   }
 
   const resolvedExpert = normalizeExpert(expert);
@@ -312,14 +406,19 @@ Critical rules:
 - The translated text must match the meaning of the source block.
 - Keep punctuation, numbers, emojis, and line intent when possible.
 - Final translated text must always be in ${targetLanguage}.
+- Also detect the true source language of the OCR text.
+- "detected_source_language" must be a lowercase language code like: tr, en, de, fr, es, it, pt, ru, ar, hi, ja, ko.
 
-Return EXACTLY this JSON array shape:
-[
-  {
-    "index": 0,
-    "translated_text": "..."
-  }
-]
+Return EXACTLY this JSON shape:
+{
+  "detected_source_language": "tr",
+  "blocks": [
+    {
+      "index": 0,
+      "translated_text": "..."
+    }
+  ]
+}
 
 Domain/context: ${resolvedExpert}
 Domain guidance: ${buildExpertTopicGuide(resolvedExpert)}
@@ -340,13 +439,13 @@ ${JSON.stringify(safeBlocks, null, 2)}
   const parsed =
     safeJsonParse(extractJsonText(raw)) || safeJsonParse(raw);
 
-  if (!Array.isArray(parsed)) {
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed?.blocks)) {
     throw new Error("Gemini photo blocks formatı geçersiz");
   }
 
   const translatedMap = new Map();
 
-  for (const item of parsed) {
+  for (const item of parsed.blocks) {
     const index = Number(item?.index);
     const translatedText = (item?.translated_text || "")
       .toString()
@@ -357,17 +456,24 @@ ${JSON.stringify(safeBlocks, null, 2)}
     }
   }
 
-  return blocks.map((b, index) => ({
-    source_text: (b?.source_text || b?.text || "").toString().trim(),
-    translated_text:
-      translatedMap.get(index) ||
-      (b?.source_text || b?.text || "").toString().trim(),
-    x: clamp01(b?.x, 0),
-    y: clamp01(b?.y, 0),
-    width: clamp01(b?.width, 0),
-    height: clamp01(b?.height, 0),
-  }));
+  return {
+    detected_source_language: normalizeDetectedLanguageCode(
+      parsed?.detected_source_language,
+      normalizeDetectedLanguageCode(sourceLanguage)
+    ),
+    blocks: blocks.map((b, index) => ({
+      source_text: (b?.source_text || b?.text || "").toString().trim(),
+      translated_text:
+        translatedMap.get(index) ||
+        (b?.source_text || b?.text || "").toString().trim(),
+      x: clamp01(b?.x, 0),
+      y: clamp01(b?.y, 0),
+      width: clamp01(b?.width, 0),
+      height: clamp01(b?.height, 0),
+    })),
+  };
 }
+
 async function translatePhotoWithGemini({
   imageBase64,
   mimeType,
@@ -399,6 +505,7 @@ Return EXACTLY:
 {
   "source_text": "all detected source text joined with line breaks",
   "translated_text": "all translated text joined with line breaks",
+  "detected_source_language": "tr",
   "blocks": [
     {
       "source_text": "original text block",
@@ -413,6 +520,8 @@ Return EXACTLY:
 
 Important:
 - Final translated text must always be in ${targetLanguage}.
+- Also detect the true source language of the visible text.
+- "detected_source_language" must be a lowercase language code like: tr, en, de, fr, es, it, pt, ru, ar, hi, ja, ko.
 - Domain/context: ${resolvedExpert}
 - Domain guidance: ${buildExpertTopicGuide(resolvedExpert)}
 
@@ -420,6 +529,7 @@ If there is no visible text, return:
 {
   "source_text": "",
   "translated_text": "",
+  "detected_source_language": "${normalizeDetectedLanguageCode(sourceLanguage)}",
   "blocks": []
 }
       `.trim()
@@ -447,6 +557,7 @@ Return JSON in exactly this shape:
 {
   "source_text": "all detected source text joined with line breaks",
   "translated_text": "all translated text joined with line breaks",
+  "detected_source_language": "tr",
   "blocks": [
     {
       "source_text": "original text block",
@@ -463,6 +574,8 @@ Important rules:
 - If the image has many UI labels, buttons, headings, or separate lines, return separate blocks only when necessary.
 - Do NOT merge the whole image into one block unless absolutely necessary.
 - Final translated text must always be in ${targetLanguage}.
+- Also detect the true source language of the visible text.
+- "detected_source_language" must be a lowercase language code like: tr, en, de, fr, es, it, pt, ru, ar, hi, ja, ko.
 - Domain/context: ${resolvedExpert}
 - Domain guidance: ${buildExpertTopicGuide(resolvedExpert)}
 
@@ -470,6 +583,7 @@ If there is no visible text, return:
 {
   "source_text": "",
   "translated_text": "",
+  "detected_source_language": "${normalizeDetectedLanguageCode(sourceLanguage)}",
   "blocks": []
 }
       `.trim();
@@ -515,6 +629,11 @@ If there is no visible text, return:
 
   const sourceText = (parsed?.source_text || "").toString().trim();
   const translatedText = (parsed?.translated_text || "").toString().trim();
+  const detectedSourceLanguage = normalizeDetectedLanguageCode(
+    parsed?.detected_source_language,
+    normalizeDetectedLanguageCode(sourceLanguage)
+  );
+
   let blocks = normalizeGeminiBlocks(parsed?.blocks || []);
 
   if (blocks.length > 20) {
@@ -537,6 +656,7 @@ If there is no visible text, return:
   return {
     source_text: sourceText,
     translated_text: translatedText,
+    detected_source_language: detectedSourceLanguage,
     blocks,
   };
 }
