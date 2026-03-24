@@ -381,7 +381,6 @@ async function translatePhotoBlocksWithGemini({
 
   if (!safeBlocks.length) {
     return {
-      detected_source_language: normalizeDetectedLanguageCode(sourceLanguage),
       blocks: [],
     };
   }
@@ -406,12 +405,9 @@ Critical rules:
 - The translated text must match the meaning of the source block.
 - Keep punctuation, numbers, emojis, and line intent when possible.
 - Final translated text must always be in ${targetLanguage}.
-- Also detect the true source language of the OCR text.
-- "detected_source_language" must be a lowercase language code like: tr, en, de, fr, es, it, pt, ru, ar, hi, ja, ko.
 
 Return EXACTLY this JSON shape:
 {
-  "detected_source_language": "tr",
   "blocks": [
     {
       "index": 0,
@@ -457,10 +453,6 @@ ${JSON.stringify(safeBlocks, null, 2)}
   }
 
   return {
-    detected_source_language: normalizeDetectedLanguageCode(
-      parsed?.detected_source_language,
-      normalizeDetectedLanguageCode(sourceLanguage)
-    ),
     blocks: blocks.map((b, index) => ({
       source_text: (b?.source_text || b?.text || "").toString().trim(),
       translated_text:
@@ -505,7 +497,6 @@ Return EXACTLY:
 {
   "source_text": "all detected source text joined with line breaks",
   "translated_text": "all translated text joined with line breaks",
-  "detected_source_language": "tr",
   "blocks": [
     {
       "source_text": "original text block",
@@ -520,8 +511,6 @@ Return EXACTLY:
 
 Important:
 - Final translated text must always be in ${targetLanguage}.
-- Also detect the true source language of the visible text.
-- "detected_source_language" must be a lowercase language code like: tr, en, de, fr, es, it, pt, ru, ar, hi, ja, ko.
 - Domain/context: ${resolvedExpert}
 - Domain guidance: ${buildExpertTopicGuide(resolvedExpert)}
 
@@ -529,7 +518,6 @@ If there is no visible text, return:
 {
   "source_text": "",
   "translated_text": "",
-  "detected_source_language": "${normalizeDetectedLanguageCode(sourceLanguage)}",
   "blocks": []
 }
       `.trim()
@@ -557,7 +545,6 @@ Return JSON in exactly this shape:
 {
   "source_text": "all detected source text joined with line breaks",
   "translated_text": "all translated text joined with line breaks",
-  "detected_source_language": "tr",
   "blocks": [
     {
       "source_text": "original text block",
@@ -574,8 +561,6 @@ Important rules:
 - If the image has many UI labels, buttons, headings, or separate lines, return separate blocks only when necessary.
 - Do NOT merge the whole image into one block unless absolutely necessary.
 - Final translated text must always be in ${targetLanguage}.
-- Also detect the true source language of the visible text.
-- "detected_source_language" must be a lowercase language code like: tr, en, de, fr, es, it, pt, ru, ar, hi, ja, ko.
 - Domain/context: ${resolvedExpert}
 - Domain guidance: ${buildExpertTopicGuide(resolvedExpert)}
 
@@ -583,7 +568,6 @@ If there is no visible text, return:
 {
   "source_text": "",
   "translated_text": "",
-  "detected_source_language": "${normalizeDetectedLanguageCode(sourceLanguage)}",
   "blocks": []
 }
       `.trim();
@@ -629,10 +613,6 @@ If there is no visible text, return:
 
   const sourceText = (parsed?.source_text || "").toString().trim();
   const translatedText = (parsed?.translated_text || "").toString().trim();
-  const detectedSourceLanguage = normalizeDetectedLanguageCode(
-    parsed?.detected_source_language,
-    normalizeDetectedLanguageCode(sourceLanguage)
-  );
 
   let blocks = normalizeGeminiBlocks(parsed?.blocks || []);
 
@@ -656,7 +636,6 @@ If there is no visible text, return:
   return {
     source_text: sourceText,
     translated_text: translatedText,
-    detected_source_language: detectedSourceLanguage,
     blocks,
   };
 }
