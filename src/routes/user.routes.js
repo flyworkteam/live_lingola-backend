@@ -1,6 +1,18 @@
 const express = require("express");
+const multer = require("multer");
 const router = express.Router();
 const pool = require("../config/mysql");
+const {
+  buildProfilePhotoPath,
+  uploadBufferToBunny,
+} = require("../services/bunny.service");
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 8 * 1024 * 1024,
+  },
+});
 
 function cleanString(value) {
   if (value === undefined || value === null) return null;
@@ -223,6 +235,84 @@ router.get("/firebase/:firebaseUid", async (req, res) => {
     });
   }
 });
+
+router.post(
+  "/firebase/:firebaseUid/photo",
+  upload.single("photo"),
+  async (req, res) => {
+    try {
+      const firebaseUid = cleanString(req.params.firebaseUid);
+
+      console.log("UPLOAD PROFILE PHOTO REQUEST FIREBASE UID:", firebaseUid);
+      console.log("UPLOAD PROFILE PHOTO FILE EXISTS:", !!req.file);
+
+      if (!firebaseUid) {
+        return res.status(400).json({
+          ok: false,
+          error: "firebaseUid is required",
+        });
+      }
+
+      if (!req.file || !req.file.buffer) {
+        console.log("UPLOAD PROFILE PHOTO ERROR: req.file missing");
+        return res.status(400).json({
+          ok: false,
+          error: "photo file is required",
+        });
+      }
+
+      const mimeType = cleanString(req.file.mimetype) || "image/jpeg";
+      const originalName = cleanString(req.file.originalname) || "profile.jpg";
+
+      console.log("UPLOAD PROFILE PHOTO MIME TYPE:", mimeType);
+      console.log("UPLOAD PROFILE PHOTO ORIGINAL NAME:", originalName);
+      console.log("UPLOAD PROFILE PHOTO BUFFER SIZE:", req.file.buffer.length);
+
+      const allowedMimeTypes = [
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/webp",
+      ];
+
+      if (!allowedMimeTypes.includes(mimeType)) {
+        console.log("UPLOAD PROFILE PHOTO ERROR: invalid mime type");
+        return res.status(400).json({
+          ok: false,
+          error: "Only jpg, jpeg, png, webp files are allowed",
+        });
+      }
+
+      const remotePath = buildProfilePhotoPath({
+        firebaseUid,
+        originalName,
+      });
+
+      console.log("UPLOAD PROFILE PHOTO REMOTE PATH:", remotePath);
+      console.log("UPLOAD PROFILE PHOTO STARTING BUNNY UPLOAD...");
+
+      const uploadResult = await uploadBufferToBunny({
+        buffer: req.file.buffer,
+        remotePath,
+        contentType: mimeType,
+      });
+
+      console.log("UPLOAD PROFILE PHOTO RESULT:", uploadResult);
+
+      return res.json({
+        ok: true,
+        photo_url: uploadResult.publicUrl,
+        path: remotePath,
+      });
+    } catch (error) {
+      console.error("UPLOAD PROFILE PHOTO ERROR:", error);
+      return res.status(500).json({
+        ok: false,
+        error: error.message,
+      });
+    }
+  }
+);
 
 router.put("/firebase/:firebaseUid", async (req, res) => {
   try {
