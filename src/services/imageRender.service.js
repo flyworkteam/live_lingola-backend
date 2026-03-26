@@ -9,15 +9,6 @@ function escapeXml(text = "") {
     .replace(/>/g, "&gt;");
 }
 
-function rgbToHex(r, g, b) {
-  const toHex = (v) => {
-    const n = Math.max(0, Math.min(255, Math.round(v)));
-    return n.toString(16).padStart(2, "0");
-  };
-
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-}
-
 function getLuminance(r, g, b) {
   const [rs, gs, bs] = [r, g, b].map((v) => {
     const c = v / 255;
@@ -29,24 +20,35 @@ function getLuminance(r, g, b) {
 
 function chooseReadableTextColor(bg) {
   const lum = getLuminance(bg.r, bg.g, bg.b);
-  return lum > 0.55 ? "#111111" : "#ffffff";
+  return lum > 0.5 ? "#000000" : "#ffffff";
 }
 
 function normalizeText(text = "") {
   return String(text).replace(/\r/g, "").trim();
 }
 
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
 function estimateCharWidth(fontSize) {
-  return fontSize * 0.58;
+  return fontSize * 0.52;
 }
 
 function wrapTextToWidth(text, maxWidth, fontSize) {
   const clean = normalizeText(text);
   if (!clean) return [];
 
-  const paragraphs = clean.split("\n").map((item) => item.trim()).filter(Boolean);
+  const paragraphs = clean
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
   const lines = [];
-  const maxCharsPerLine = Math.max(4, Math.floor(maxWidth / estimateCharWidth(fontSize)));
+  const maxCharsPerLine = Math.max(
+    1,
+    Math.floor(maxWidth / Math.max(1, estimateCharWidth(fontSize)))
+  );
 
   for (const paragraph of paragraphs) {
     const words = paragraph.split(/\s+/).filter(Boolean);
@@ -83,15 +85,21 @@ async function sampleRegionAverageColor(buffer, left, top, width, height) {
   const image = sharp(buffer);
   const meta = await image.metadata();
 
-  const safeLeft = Math.max(0, Math.min(meta.width - 1, Math.floor(left)));
-  const safeTop = Math.max(0, Math.min(meta.height - 1, Math.floor(top)));
+  const safeLeft = Math.max(
+    0,
+    Math.min((meta.width || 1) - 1, Math.floor(left))
+  );
+  const safeTop = Math.max(
+    0,
+    Math.min((meta.height || 1) - 1, Math.floor(top))
+  );
   const safeWidth = Math.max(
     1,
-    Math.min(meta.width - safeLeft, Math.floor(width))
+    Math.min((meta.width || 1) - safeLeft, Math.floor(width))
   );
   const safeHeight = Math.max(
     1,
-    Math.min(meta.height - safeTop, Math.floor(height))
+    Math.min((meta.height || 1) - safeTop, Math.floor(height))
   );
 
   const stats = await image
@@ -111,16 +119,224 @@ async function sampleRegionAverageColor(buffer, left, top, width, height) {
   return { r, g, b };
 }
 
-async function sampleBackgroundColorInsideBlock(buffer, x, y, w, h) {
-  const innerPadX = Math.max(2, Math.floor(w * 0.1));
-  const innerPadY = Math.max(2, Math.floor(h * 0.15));
+async function sampleBackgroundColorAroundBlock(buffer, x, y, w, h, meta) {
+  const padX = Math.max(2, Math.floor(w * 0.05));
+  const padY = Math.max(2, Math.floor(h * 0.06));
 
-  const left = x + innerPadX;
-  const top = y + innerPadY;
-  const width = Math.max(1, w - innerPadX * 2);
-  const height = Math.max(1, h - innerPadY * 2);
+  const regions = [];
 
-  return sampleRegionAverageColor(buffer, left, top, width, height);
+  if (y - padY > 0) {
+    regions.push({
+      left: x,
+      top: Math.max(0, y - padY),
+      width: w,
+      height: padY,
+    });
+  }
+
+  if (y + h < (meta.height || 0)) {
+    regions.push({
+      left: x,
+      top: y + h,
+      width: w,
+      height: Math.min(padY, (meta.height || 0) - (y + h)),
+    });
+  }
+
+  if (x - padX > 0) {
+    regions.push({
+      left: Math.max(0, x - padX),
+      top: y,
+      width: padX,
+      height: h,
+    });
+  }
+
+  if (x + w < (meta.width || 0)) {
+    regions.push({
+      left: x + w,
+      top: y,
+      width: Math.min(padX, (meta.width || 0) - (x + w)),
+      height: h,
+    });
+  }
+
+  if (!regions.length) {
+    return sampleRegionAverageColor(buffer, x, y, w, h);
+  }
+
+  const samples = [];
+  for (const region of regions) {
+    if (region.width > 0 && region.height > 0) {
+      samples.push(
+        await sampleRegionAverageColor(
+          buffer,
+          region.left,
+          region.top,
+          region.width,
+          region.height
+        )
+      );
+    }
+  }
+
+  if (!samples.length) {
+    return sampleRegionAverageColor(buffer, x, y, w, h);
+  }
+
+  const total = samples.reduce(
+    (acc, item) => ({
+      r: acc.r + item.r,
+      g: acc.g + item.g,
+      b: acc.b + item.b,
+    }),
+    { r: 0, g: 0, b: 0 }
+  );
+
+  return {
+    r: total.r / samples.length,
+    g: total.g / samples.length,
+    b: total.b / samples.length,
+  };
+}
+
+function resolveInitialFontSize(boxHeight) {
+  if (boxHeight <= 10) return 8;
+  if (boxHeight <= 12) return 9;
+  if (boxHeight <= 14) return 10;
+  if (boxHeight <= 17) return 11;
+  if (boxHeight <= 20) return 12;
+  if (boxHeight <= 24) return 13;
+  if (boxHeight <= 28) return 14;
+  if (boxHeight <= 34) return 16;
+  if (boxHeight <= 42) return 18;
+  return Math.max(20, Math.floor(boxHeight * 0.58));
+}
+
+function layoutTextInsideSourceBox({
+  translatedText,
+  boxWidth,
+  boxHeight,
+}) {
+  const cleanText = normalizeText(translatedText);
+
+  const insetX = clamp(Math.floor(boxWidth * 0.04), 2, 12);
+  const insetY = clamp(Math.floor(boxHeight * 0.10), 1, 10);
+
+  const innerWidth = Math.max(8, boxWidth - insetX * 2);
+  const innerHeight = Math.max(8, boxHeight - insetY * 2);
+
+  let fontSize = resolveInitialFontSize(boxHeight);
+  let lines = [cleanText];
+  let lineHeight = Math.max(fontSize + 1, Math.round(fontSize * 1.16));
+
+  while (fontSize >= 8) {
+    lines = wrapTextToWidth(cleanText, innerWidth, fontSize);
+    if (!lines.length) lines = [cleanText];
+
+    lineHeight = Math.max(fontSize + 1, Math.round(fontSize * 1.16));
+    const totalHeight = lines.length * lineHeight;
+
+    if (totalHeight <= innerHeight) {
+      break;
+    }
+
+    fontSize -= 1;
+  }
+
+  if (fontSize < 8) {
+    fontSize = 8;
+    lines = wrapTextToWidth(cleanText, innerWidth, fontSize);
+    if (!lines.length) lines = [cleanText];
+    lineHeight = Math.max(fontSize + 1, Math.round(fontSize * 1.16));
+  }
+
+  const maxLines = Math.max(1, Math.floor(innerHeight / lineHeight));
+
+  if (lines.length > maxLines) {
+    lines = lines.slice(0, maxLines);
+    if (lines.length > 0) {
+      const lastIndex = lines.length - 1;
+      lines[lastIndex] = `${lines[lastIndex].replace(/\.*$/, "")}…`;
+    }
+  }
+
+  const totalTextHeight = lines.length * lineHeight;
+  const offsetY = Math.max(
+    insetY,
+    Math.floor((boxHeight - totalTextHeight) / 2)
+  );
+
+  return {
+    fontSize,
+    lineHeight,
+    lines,
+    insetX,
+    offsetY,
+  };
+}
+
+async function buildBlurPatchForSourceBox({
+  buffer,
+  meta,
+  left,
+  top,
+  width,
+  height,
+  backgroundSample,
+}) {
+  const patchLeft = Math.max(0, Math.floor(left));
+  const patchTop = Math.max(0, Math.floor(top));
+  const patchWidth = Math.max(
+    1,
+    Math.min(meta.width - patchLeft, Math.floor(width))
+  );
+  const patchHeight = Math.max(
+    1,
+    Math.min(meta.height - patchTop, Math.floor(height))
+  );
+
+  const blurSigma =
+    patchHeight <= 18 || patchWidth <= 60
+      ? 2.4
+      : patchHeight <= 30 || patchWidth <= 140
+        ? 3.4
+        : 4.4;
+
+  const extracted = await sharp(buffer)
+    .extract({
+      left: patchLeft,
+      top: patchTop,
+      width: patchWidth,
+      height: patchHeight,
+    })
+    .blur(blurSigma)
+    .composite([
+      {
+        input: {
+          create: {
+            width: patchWidth,
+            height: patchHeight,
+            channels: 4,
+            background: {
+              r: Math.round(backgroundSample.r),
+              g: Math.round(backgroundSample.g),
+              b: Math.round(backgroundSample.b),
+              alpha: 0.18,
+            },
+          },
+        },
+        blend: "over",
+      },
+    ])
+    .png()
+    .toBuffer();
+
+  return {
+    input: extracted,
+    left: patchLeft,
+    top: patchTop,
+  };
 }
 
 function buildTextSvg({
@@ -130,90 +346,39 @@ function buildTextSvg({
   boxHeight,
   translatedText,
   textColor,
-  backgroundColor,
 }) {
-  const insetX = Math.max(6, Math.floor(boxWidth * 0.08));
-  const insetY = Math.max(4, Math.floor(boxHeight * 0.14));
+  const layout = layoutTextInsideSourceBox({
+    translatedText,
+    boxWidth,
+    boxHeight,
+  });
 
-  const innerWidth = Math.max(12, boxWidth - insetX * 2);
-  const innerHeight = Math.max(12, boxHeight - insetY * 2);
-
-  let fontSize = Math.max(
-    9,
-    Math.min(28, Math.floor(Math.min(innerHeight * 0.7, innerWidth * 0.12)))
-  );
-
-  let lines = wrapTextToWidth(translatedText, innerWidth, fontSize);
-  if (!lines.length) lines = [normalizeText(translatedText)];
-
-  let lineHeight = Math.max(10, Math.floor(fontSize * 1.2));
-  let totalHeight = lines.length * lineHeight;
-
-  while ((totalHeight > innerHeight || lines.length > 8) && fontSize > 8) {
-    fontSize -= 1;
-    lines = wrapTextToWidth(translatedText, innerWidth, fontSize);
-    if (!lines.length) lines = [normalizeText(translatedText)];
-    lineHeight = Math.max(10, Math.floor(fontSize * 1.2));
-    totalHeight = lines.length * lineHeight;
-  }
-
-  if (totalHeight > innerHeight && lines.length > 1) {
-    const maxLines = Math.max(1, Math.floor(innerHeight / lineHeight));
-    lines = lines.slice(0, maxLines);
-  }
-
-  if (lines.length > 0) {
-    const lastIndex = lines.length - 1;
-    if (lines[lastIndex].length > 2) {
-      const needsEllipsis =
-        wrapTextToWidth(translatedText, innerWidth, fontSize).length > lines.length;
-
-      if (needsEllipsis) {
-        lines[lastIndex] = `${lines[lastIndex].replace(/\.*$/, "")}…`;
-      }
-    }
-  }
-
-  const totalHeightFinal = lines.length * lineHeight;
-  const textStartY =
-    y + insetY + Math.max(0, Math.floor((innerHeight - totalHeightFinal) / 2));
-
-  const safeBg = escapeXml(backgroundColor);
   const safeTextColor = escapeXml(textColor);
+  const fontWeight = layout.fontSize <= 11 ? "600" : "700";
 
-  const textLines = lines
+  return layout.lines
     .map((line, index) => {
       const safeLine = escapeXml(line);
-      const lineY = textStartY + fontSize + index * lineHeight;
+      const lineY =
+        y +
+        layout.offsetY +
+        (index + 1) * layout.lineHeight -
+        Math.round((layout.lineHeight - layout.fontSize) / 2);
 
       return `
         <text
-          x="${x + insetX}"
+          x="${x + layout.insetX}"
           y="${lineY}"
-          font-size="${fontSize}"
+          font-size="${layout.fontSize}"
           fill="${safeTextColor}"
           font-family="Arial, Helvetica, sans-serif"
-          font-weight="700"
+          font-weight="${fontWeight}"
         >
           ${safeLine}
         </text>
       `;
     })
     .join("");
-
-  return `
-    <rect
-      x="${x}"
-      y="${y}"
-      width="${boxWidth}"
-      height="${boxHeight}"
-      rx="5"
-      ry="5"
-      fill="${safeBg}"
-      fill-opacity="0.97"
-    />
-    ${textLines}
-  `;
 }
 
 async function renderTranslatedImage(buffer, blocks) {
@@ -235,60 +400,73 @@ async function renderTranslatedImage(buffer, blocks) {
     return width > 0 && height > 0 && !(width >= 0.95 && height >= 0.95);
   });
 
-  const overlays = [];
+  if (!validBlocks.length) {
+    return null;
+  }
+
+  const backgroundPatches = [];
+  const textOverlays = [];
 
   for (const b of validBlocks) {
     const x = Math.max(0, Math.floor((Number(b.x) || 0) * meta.width));
     const y = Math.max(0, Math.floor((Number(b.y) || 0) * meta.height));
     const boxWidth = Math.max(
-      28,
+      8,
       Math.floor((Number(b.width) || 0) * meta.width)
     );
     const boxHeight = Math.max(
-      18,
+      8,
       Math.floor((Number(b.height) || 0) * meta.height)
     );
 
-    const backgroundSample = await sampleBackgroundColorInsideBlock(
+    const translatedText = String(b.translated_text || "").trim();
+
+    const backgroundSample = await sampleBackgroundColorAroundBlock(
       buffer,
       x,
       y,
       boxWidth,
-      boxHeight
+      boxHeight,
+      meta
     );
 
-    const backgroundColor = rgbToHex(
-      backgroundSample.r,
-      backgroundSample.g,
-      backgroundSample.b
-    );
     const textColor = chooseReadableTextColor(backgroundSample);
 
-    overlays.push(
+    const patch = await buildBlurPatchForSourceBox({
+      buffer,
+      meta,
+      left: x,
+      top: y,
+      width: boxWidth,
+      height: boxHeight,
+      backgroundSample,
+    });
+
+    backgroundPatches.push(patch);
+
+    textOverlays.push(
       buildTextSvg({
         x,
         y,
         boxWidth,
         boxHeight,
-        translatedText: String(b.translated_text || "").trim(),
+        translatedText,
         textColor,
-        backgroundColor,
       })
     );
   }
 
-  if (overlays.length === 0) {
-    return null;
-  }
-
   const svg = `
     <svg width="${meta.width}" height="${meta.height}" xmlns="http://www.w3.org/2000/svg">
-      ${overlays.join("\n")}
+      ${textOverlays.join("\n")}
     </svg>
   `;
 
   const out = await image
-    .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+    .composite([
+      ...backgroundPatches,
+      { input: Buffer.from(svg), top: 0, left: 0 },
+    ])
     .png()
     .toBuffer();
 

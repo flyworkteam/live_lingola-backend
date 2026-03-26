@@ -402,8 +402,9 @@ Critical rules:
 - Do not reorder blocks.
 - Do not omit blocks.
 - Translate each block independently.
+- If a block is very short UI text, keep it short and natural.
 - The translated text must match the meaning of the source block.
-- Keep punctuation, numbers, emojis, and line intent when possible.
+- Keep punctuation, numbers, emojis, symbols, and line intent when possible.
 - Final translated text must always be in ${targetLanguage}.
 
 Return EXACTLY this JSON shape:
@@ -426,7 +427,7 @@ ${JSON.stringify(safeBlocks, null, 2)}
   const raw = await callGemini({
     parts: [{ text: prompt }],
     responseMimeType: "application/json",
-    temperature: 0.2,
+    temperature: 0.18,
     topP: 0.9,
     topK: 32,
     maxOutputTokens: 4096,
@@ -453,16 +454,18 @@ ${JSON.stringify(safeBlocks, null, 2)}
   }
 
   return {
-    blocks: blocks.map((b, index) => ({
-      source_text: (b?.source_text || b?.text || "").toString().trim(),
-      translated_text:
-        translatedMap.get(index) ||
-        (b?.source_text || b?.text || "").toString().trim(),
-      x: clamp01(b?.x, 0),
-      y: clamp01(b?.y, 0),
-      width: clamp01(b?.width, 0),
-      height: clamp01(b?.height, 0),
-    })),
+    blocks: blocks.map((b, index) => {
+      const sourceText = (b?.source_text || b?.text || "").toString().trim();
+
+      return {
+        source_text: sourceText,
+        translated_text: translatedMap.get(index) || sourceText,
+        x: clamp01(b?.x, 0),
+        y: clamp01(b?.y, 0),
+        width: clamp01(b?.width, 0),
+        height: clamp01(b?.height, 0),
+      };
+    }),
   };
 }
 

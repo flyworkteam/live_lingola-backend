@@ -9,9 +9,13 @@ const { renderTranslatedImage } = require("../services/imageRender.service");
 const { detectText } = require("../services/ocr.service");
 const {
   translatePhotoWithGemini,
+  translatePhotoBlocksWithGemini,
   normalizeGeminiBlocks,
 } = require("../services/gemini.service");
- 
+const {
+  cleanupPhotoBlocksForTranslation,
+} = require("../services/photoLayout.service");
+
 async function getUserIdByFirebaseUid(firebaseUid) {
   const [rows] = await pool.query(
     `
@@ -40,7 +44,9 @@ function clamp01(value, fallback = 0) {
 }
 
 function normalizePhotoBlock(block) {
-  const sourceText = (block?.source_text || block?.text || "").toString().trim();
+  const sourceText = (block?.source_text || block?.text || "")
+    .toString()
+    .trim();
   const translatedText = (block?.translated_text || "").toString().trim();
 
   return {
@@ -54,33 +60,9 @@ function normalizePhotoBlock(block) {
 }
 
 function cleanupPhotoBlocks(blocks) {
-  if (!Array.isArray(blocks)) return [];
-
-  return blocks
-    .map(normalizePhotoBlock)
-    .filter((b) => {
-      if (!b.source_text && !b.translated_text) return false;
-      if (b.width <= 0 || b.height <= 0) return false;
-      if (b.width >= 0.95 && b.height >= 0.95) return false;
-
-      const longSingleLineGarbage =
-        (b.source_text || "").length > 180 && b.height < 0.09 && b.width > 0.75;
-
-      if (longSingleLineGarbage) return false;
-
-      return true;
-    })
-    .map((b) => ({
-      ...b,
-      x: Math.max(0, b.x - 0.002),
-      y: Math.max(0, b.y - 0.002),
-      width: Math.min(1 - Math.max(0, b.x - 0.002), b.width + 0.004),
-      height: Math.min(1 - Math.max(0, b.y - 0.002), b.height + 0.004),
-    }))
-    .sort((a, b) => {
-      if (Math.abs(a.y - b.y) > 0.01) return a.y - b.y;
-      return a.x - b.x;
-    });
+  return cleanupPhotoBlocksForTranslation(
+    (Array.isArray(blocks) ? blocks : []).map(normalizePhotoBlock)
+  );
 }
 
 const translateText = async (req, res) => {
@@ -282,10 +264,11 @@ const translatePhoto = async (req, res) => {
 
     let normalizedBuffer;
     try {
-normalizedBuffer = await sharp(req.file.buffer)
-  .resize({ width: 1400, withoutEnlargement: true })
-  .jpeg({ quality: 88 })
-  .toBuffer();
+      normalizedBuffer = await sharp(req.file.buffer)
+        .rotate()
+        .resize({ width: 1400, withoutEnlargement: true })
+        .jpeg({ quality: 90 })
+        .toBuffer();
     } catch (e) {
       console.error("PHOTO NORMALIZE ERROR:", e);
       return res.status(400).json({
@@ -294,34 +277,125 @@ normalizedBuffer = await sharp(req.file.buffer)
       });
     }
 
-    const geminiPhoto = await translatePhotoWithGemini({
-      imageBase64: normalizedBuffer.toString("base64"),
-      mimeType: "image/jpeg",
-      sourceLanguage: source_language,
-      targetLanguage: target_language,
-      expert: expert || "General",
-    });
+    let sourceTextValue = "";
+    let translatedTextValue = "";
+    let translatedBlocks = [];
+    let processingMode = "ocr_blocks";
 
-    const sourceTextValue = (geminiPhoto?.source_text || "").toString().trim();
-    const translatedTextValue = (geminiPhoto?.translated_text || "")
-      .toString()
-      .trim();
+    try {
+      let ocrResult = await detectText(normalizedBuffer, source_language);
 
-    let translatedBlocks = normalizeGeminiBlocks(geminiPhoto?.blocks || []);
+      let rawOcrBlocks = Array.isArray(ocrResult?.blocks)
+        ? ocrResult.blocks.map((b) => ({
+            source_text: (b?.text || "").toString().trim(),
+            x: b?.x,
+            y: b?.y,
+            width: b?.width,
+            height: b?.height,
+          }))
+        : [];
 
-    if (translatedBlocks.length === 0 && translatedTextValue) {
-      translatedBlocks = [
-        {
-          x: 0.05,
-          y: 0.05,
-          width: 0.9,
-          height: 0.2,
-          source_text: sourceTextValue,
-          translated_text: translatedTextValue,
-        },
-      ];
+      let cleanedOcrBlocks = cleanupPhotoBlocks(rawOcrBlocks);
+
+      if (!cleanedOcrBlocks.length) {
+        const retryOcrResult = await detectText(normalizedBuffer, "auto");
+
+        const retryRawBlocks = Array.isArray(retryOcrResult?.blocks)
+          ? retryOcrResult.blocks.map((b) => ({
+              source_text: (b?.text || "").toString().trim(),
+              x: b?.x,
+              y: b?.y,
+              width: b?.width,
+              height: b?.height,
+            }))
+          : [];
+
+        const retryCleanedBlocks = cleanupPhotoBlocks(retryRawBlocks);
+
+        if (retryCleanedBlocks.length > cleanedOcrBlocks.length) {
+          ocrResult = retryOcrResult;
+          rawOcrBlocks = retryRawBlocks;
+          cleanedOcrBlocks = retryCleanedBlocks;
+        }
+      }
+
+      console.log("PHOTO OCR VARIANT:", ocrResult?.variant || "unknown");
+      console.log("PHOTO OCR USED LANGUAGE:", ocrResult?.usedLanguage || source_language);
+      console.log("PHOTO OCR RAW TEXT:", ocrResult?.rawText || "");
+      console.log("PHOTO OCR RAW BLOCK COUNT:", rawOcrBlocks.length);
+      console.log("PHOTO OCR CLEAN BLOCK COUNT:", cleanedOcrBlocks.length);
+      console.log("PHOTO OCR CLEAN BLOCKS:", cleanedOcrBlocks);
+
+      sourceTextValue = (ocrResult?.rawText || "").toString().trim();
+
+      if (cleanedOcrBlocks.length > 0) {
+        const translated = await translatePhotoBlocksWithGemini({
+          blocks: cleanedOcrBlocks,
+          sourceLanguage: source_language,
+          targetLanguage: target_language,
+          expert: expert || "General",
+        });
+
+        translatedBlocks = normalizeGeminiBlocks(translated?.blocks || []);
+        translatedTextValue = translatedBlocks
+          .map((b) => (b?.translated_text || "").toString().trim())
+          .filter(Boolean)
+          .join("\n");
+      }
+
+      if (!translatedBlocks.length) {
+        processingMode = "gemini_fallback";
+
+        const geminiPhoto = await translatePhotoWithGemini({
+          imageBase64: normalizedBuffer.toString("base64"),
+          mimeType: "image/jpeg",
+          sourceLanguage: source_language,
+          targetLanguage: target_language,
+          expert: expert || "General",
+        });
+
+        sourceTextValue = (geminiPhoto?.source_text || sourceTextValue || "")
+          .toString()
+          .trim();
+        translatedTextValue = (geminiPhoto?.translated_text || "")
+          .toString()
+          .trim();
+        translatedBlocks = normalizeGeminiBlocks(geminiPhoto?.blocks || []);
+      }
+
+      if (!translatedBlocks.length && translatedTextValue) {
+        translatedBlocks = [
+          {
+            x: 0.05,
+            y: 0.05,
+            width: 0.9,
+            height: 0.2,
+            source_text: sourceTextValue,
+            translated_text: translatedTextValue,
+          },
+        ];
+      }
+    } catch (e) {
+      console.error("PHOTO PIPELINE ERROR:", e);
+
+      processingMode = "gemini_fallback_error_path";
+
+      const geminiPhoto = await translatePhotoWithGemini({
+        imageBase64: normalizedBuffer.toString("base64"),
+        mimeType: "image/jpeg",
+        sourceLanguage: source_language,
+        targetLanguage: target_language,
+        expert: expert || "General",
+      });
+
+      sourceTextValue = (geminiPhoto?.source_text || "").toString().trim();
+      translatedTextValue = (geminiPhoto?.translated_text || "")
+        .toString()
+        .trim();
+      translatedBlocks = normalizeGeminiBlocks(geminiPhoto?.blocks || []);
     }
 
+    console.log("PHOTO FINAL MODE:", processingMode);
     console.log("PHOTO FINAL SOURCE TEXT:", sourceTextValue);
     console.log("PHOTO FINAL TRANSLATED TEXT:", translatedTextValue);
     console.log("PHOTO FINAL BLOCKS:", translatedBlocks);
@@ -378,6 +452,7 @@ normalizedBuffer = await sharp(req.file.buffer)
       blocks: translatedBlocks,
       original_image_base64: normalizedBuffer.toString("base64"),
       translated_image_base64: translatedImageBase64,
+      render_mode: processingMode,
     });
   } catch (error) {
     console.error("TRANSLATE PHOTO ERROR:", error);

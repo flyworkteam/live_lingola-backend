@@ -19,40 +19,28 @@ function mapToTesseractLanguage(language) {
   const languageMap = {
     tr: "tur",
     turkish: "tur",
-
     en: "eng",
     english: "eng",
-
     de: "deu",
     german: "deu",
-
     it: "ita",
     italian: "ita",
-
     fr: "fra",
     french: "fra",
-
     es: "spa",
     spanish: "spa",
-
     ru: "rus",
     russian: "rus",
-
     ko: "kor",
     korean: "kor",
-
     hi: "hin",
     hindi: "hin",
-
     ja: "jpn",
     japanese: "jpn",
-
     pt: "por",
     portuguese: "por",
-
     ar: "ara",
     arabic: "ara",
-
     auto: "eng+tur+deu+ita+fra+spa+rus+kor+hin+jpn+por+ara",
   };
 
@@ -102,14 +90,14 @@ function shouldKeepBlock(text, widthNorm, heightNorm) {
   const alnumCount = (clean.match(/[\p{L}\p{N}]/gu) || []).length;
   if (alnumCount < 2) return false;
 
-  if (widthNorm < 0.01 && heightNorm < 0.01) return false;
+  if (widthNorm < 0.004 && heightNorm < 0.004) return false;
 
   return true;
 }
 
 function sortBlocks(blocks) {
   return [...blocks].sort((a, b) => {
-    if (Math.abs(a.y - b.y) > 0.012) return a.y - b.y;
+    if (Math.abs(a.y - b.y) > 0.008) return a.y - b.y;
     return a.x - b.x;
   });
 }
@@ -137,63 +125,19 @@ function buildBlocksFromWords(words, imageWidth, imageHeight) {
   const usefulWords = words.filter((word) => {
     const text = normalizeText(word?.text || "");
     const confidence = safeNumber(word?.confidence, 0);
-    return isUsefulText(text) && confidence >= 30;
+    return isUsefulText(text) && confidence >= 28;
   });
 
-  const groups = new Map();
-
-  for (let i = 0; i < usefulWords.length; i += 1) {
-    const word = usefulWords[i];
-    const key = [
-      word.block_num ?? "b0",
-      word.par_num ?? "p0",
-      word.line_num ?? `line_${i}`,
-    ].join("_");
-
-    const x0 = safeNumber(word?.bbox?.x0);
-    const y0 = safeNumber(word?.bbox?.y0);
-    const x1 = safeNumber(word?.bbox?.x1);
-    const y1 = safeNumber(word?.bbox?.y1);
-
-    if (!groups.has(key)) {
-      groups.set(key, {
-        texts: [],
-        x0,
-        y0,
-        x1,
-        y1,
-      });
-    }
-
-    const group = groups.get(key);
-
-    group.texts.push({
-      text: normalizeText(word.text),
-      x0,
-    });
-
-    group.x0 = Math.min(group.x0, x0);
-    group.y0 = Math.min(group.y0, y0);
-    group.x1 = Math.max(group.x1, x1);
-    group.y1 = Math.max(group.y1, y1);
-  }
-
   return sortBlocks(
-    Array.from(groups.values())
-      .map((group) => {
-        const lineText = normalizeText(
-          group.texts
-            .sort((a, b) => a.x0 - b.x0)
-            .map((item) => item.text)
-            .join(" ")
-        );
-
+    usefulWords
+      .map((word) => {
+        const box = normalizeBox(word, imageWidth, imageHeight);
         return {
-          text: lineText,
-          x: clamp01(group.x0 / imageWidth, 0),
-          y: clamp01(group.y0 / imageHeight, 0),
-          width: clamp01((group.x1 - group.x0) / imageWidth, 0),
-          height: clamp01((group.y1 - group.y0) / imageHeight, 0),
+          text: normalizeText(word.text),
+          x: clamp01(box.x, 0),
+          y: clamp01(box.y, 0),
+          width: clamp01(box.width, 0),
+          height: clamp01(box.height, 0),
         };
       })
       .filter((item) => shouldKeepBlock(item.text, item.width, item.height))
@@ -221,59 +165,6 @@ function dedupeBlocks(blocks) {
   return out;
 }
 
-function canMergeSameLine(a, b) {
-  const aMidY = a.y + a.height / 2;
-  const bMidY = b.y + b.height / 2;
-  const maxHeight = Math.max(a.height, b.height);
-
-  const sameLine = Math.abs(aMidY - bMidY) <= maxHeight * 0.45;
-  if (!sameLine) return false;
-
-  const horizontalGap = b.x - (a.x + a.width);
-  if (horizontalGap < 0) return false;
-
-  return horizontalGap <= 0.018;
-}
-
-function mergeTwoBlocks(a, b) {
-  const x = Math.min(a.x, b.x);
-  const y = Math.min(a.y, b.y);
-  const right = Math.max(a.x + a.width, b.x + b.width);
-  const bottom = Math.max(a.y + a.height, b.y + b.height);
-
-  return {
-    text: normalizeText(`${a.text} ${b.text}`),
-    x,
-    y,
-    width: right - x,
-    height: bottom - y,
-  };
-}
-
-function mergeOnlySameLineBlocks(blocks) {
-  const sorted = sortBlocks(blocks);
-  if (!sorted.length) return [];
-
-  const merged = [];
-
-  for (const block of sorted) {
-    if (!merged.length) {
-      merged.push({ ...block });
-      continue;
-    }
-
-    const last = merged[merged.length - 1];
-
-    if (canMergeSameLine(last, block)) {
-      merged[merged.length - 1] = mergeTwoBlocks(last, block);
-    } else {
-      merged.push({ ...block });
-    }
-  }
-
-  return merged;
-}
-
 function removeHugeBrokenBlocks(blocks) {
   return blocks.filter((block) => {
     const text = normalizeText(block.text);
@@ -283,11 +174,10 @@ function removeHugeBrokenBlocks(blocks) {
 
     if (!text) return false;
 
-    const lineLike = height <= 0.08;
-    const tooWideAndSuspicious = width >= 0.8 && text.length > 140;
-    const tooHugeArea = area >= 0.22 && text.length > 120;
+    const tooWideAndSuspicious = width >= 0.7 && text.length > 80;
+    const tooHugeArea = area >= 0.16 && text.length > 80;
 
-    if ((tooWideAndSuspicious || tooHugeArea) && !lineLike) {
+    if (tooWideAndSuspicious || tooHugeArea) {
       return false;
     }
 
@@ -295,10 +185,24 @@ function removeHugeBrokenBlocks(blocks) {
   });
 }
 
+function removeTinyNoiseBlocks(blocks) {
+  return blocks.filter((block) => {
+    const text = normalizeText(block.text);
+    const area = block.width * block.height;
+    const textLen = text.length;
+
+    if (!text) return false;
+    if (area < 0.00006 && textLen < 4) return false;
+    if (block.width < 0.003 || block.height < 0.003) return false;
+
+    return true;
+  });
+}
+
 function scoreBlocks(blocks, rawText) {
   const textLength = blocks.reduce((sum, item) => sum + item.text.length, 0);
-  const blockBonus = Math.min(blocks.length, 40) * 12;
-  const rawBonus = Math.min(normalizeText(rawText).length, 400);
+  const blockBonus = Math.min(blocks.length, 60) * 10;
+  const rawBonus = Math.min(normalizeText(rawText).length, 300);
   return textLength + blockBonus + rawBonus;
 }
 
@@ -308,25 +212,29 @@ async function buildPreprocessedVariants(buffer) {
 
   const width = meta.width || 0;
   const shouldUpscale = width > 0 && width < 1800;
-  const resizeWidth = shouldUpscale ? Math.min(2400, width * 2) : null;
+  const resizeWidth = shouldUpscale ? Math.min(2200, width * 2) : null;
 
   const original = await base.jpeg({ quality: 95 }).toBuffer();
 
   const enhanced = await sharp(buffer)
     .rotate()
-    .resize(resizeWidth ? { width: resizeWidth, withoutEnlargement: false } : {})
+    .resize(
+      resizeWidth ? { width: resizeWidth, withoutEnlargement: false } : {}
+    )
     .grayscale()
     .normalize()
-    .sharpen({ sigma: 1.1, m1: 1, m2: 2 })
+    .sharpen({ sigma: 1.0, m1: 1, m2: 2 })
     .jpeg({ quality: 95 })
     .toBuffer();
 
   const thresholded = await sharp(buffer)
     .rotate()
-    .resize(resizeWidth ? { width: resizeWidth, withoutEnlargement: false } : {})
+    .resize(
+      resizeWidth ? { width: resizeWidth, withoutEnlargement: false } : {}
+    )
     .grayscale()
     .normalize()
-    .threshold(175)
+    .threshold(185)
     .jpeg({ quality: 95 })
     .toBuffer();
 
@@ -353,16 +261,17 @@ async function runOcr(buffer, language) {
 
   let blocks = [];
 
-  if (lines.length > 0) {
-    blocks = buildBlocksFromLines(lines, imageWidth, imageHeight);
-  }
-
-  if (blocks.length === 0 && words.length > 0) {
+  if (words.length > 0) {
     blocks = buildBlocksFromWords(words, imageWidth, imageHeight);
   }
 
-  blocks = dedupeBlocks(mergeOnlySameLineBlocks(blocks));
+  if (blocks.length === 0 && lines.length > 0) {
+    blocks = buildBlocksFromLines(lines, imageWidth, imageHeight);
+  }
+
+  blocks = dedupeBlocks(blocks);
   blocks = removeHugeBrokenBlocks(blocks);
+  blocks = removeTinyNoiseBlocks(blocks);
 
   return {
     rawText,
@@ -378,29 +287,42 @@ async function detectText(buffer, language = "auto") {
   const variants = await buildPreprocessedVariants(buffer);
 
   let best = null;
+  const languagesToTry = [];
 
-  for (const variant of variants) {
-    try {
-      const result = await runOcr(variant.buffer, language);
+  if (language && language !== "auto") {
+    languagesToTry.push(language);
+  }
+  languagesToTry.push("auto");
 
-      console.log("OCR VARIANT:", variant.label);
-      console.log("OCR LANGUAGE:", language);
-      console.log("OCR TESSERACT LANGUAGE:", result.tesseractLanguage);
-      console.log("OCR RAW TEXT:", result.rawText);
-      console.log("OCR LINE COUNT:", result.lineCount);
-      console.log("OCR WORD COUNT:", result.wordCount);
-      console.log("OCR BLOCK COUNT:", result.blocks.length);
-      console.log("OCR SCORE:", result.score);
-      console.log("OCR BLOCKS:", result.blocks);
+  for (const candidateLanguage of languagesToTry) {
+    for (const variant of variants) {
+      try {
+        const result = await runOcr(variant.buffer, candidateLanguage);
 
-      if (!best || result.score > best.score) {
-        best = {
-          ...result,
-          variant: variant.label,
-        };
+        console.log("OCR VARIANT:", variant.label);
+        console.log("OCR LANGUAGE:", candidateLanguage);
+        console.log("OCR TESSERACT LANGUAGE:", result.tesseractLanguage);
+        console.log("OCR RAW TEXT:", result.rawText);
+        console.log("OCR LINE COUNT:", result.lineCount);
+        console.log("OCR WORD COUNT:", result.wordCount);
+        console.log("OCR BLOCK COUNT:", result.blocks.length);
+        console.log("OCR SCORE:", result.score);
+        console.log("OCR BLOCKS:", result.blocks);
+
+        if (!best || result.score > best.score) {
+          best = {
+            ...result,
+            variant: variant.label,
+            usedLanguage: candidateLanguage,
+          };
+        }
+      } catch (error) {
+        console.error(`OCR ERROR [${candidateLanguage}/${variant.label}]:`, error);
       }
-    } catch (error) {
-      console.error(`OCR ERROR [${variant.label}]:`, error);
+    }
+
+    if (best && best.blocks.length > 0) {
+      break;
     }
   }
 
@@ -416,6 +338,7 @@ async function detectText(buffer, language = "auto") {
     rawText: best.rawText,
     blocks: best.blocks,
     variant: best.variant,
+    usedLanguage: best.usedLanguage,
   };
 }
 
