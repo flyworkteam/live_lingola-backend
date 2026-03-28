@@ -1,7 +1,36 @@
-const axios = require("axios");
+const { GoogleGenAI } = require("@google/genai");
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+const GOOGLE_CLOUD_PROJECT = process.env.GOOGLE_CLOUD_PROJECT;
+const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || "global";
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+
+let aiClient = null;
+
+function getGenAIClient() {
+  if (aiClient) return aiClient;
+
+  if (!GOOGLE_CLOUD_PROJECT) {
+    throw new Error("GOOGLE_CLOUD_PROJECT missing");
+  }
+
+  if (!GOOGLE_CLOUD_LOCATION) {
+    throw new Error("GOOGLE_CLOUD_LOCATION missing");
+  }
+
+  const options = {
+    vertexai: true,
+    project: GOOGLE_CLOUD_PROJECT,
+    location: GOOGLE_CLOUD_LOCATION,
+  };
+
+  if (GOOGLE_API_KEY) {
+    options.apiKey = GOOGLE_API_KEY;
+  }
+
+  aiClient = new GoogleGenAI(options);
+  return aiClient;
+}
 
 function extractSystemPrompt(history) {
   const systemItem = history.find(
@@ -21,9 +50,7 @@ function mapHistoryToGeminiContents(history) {
 }
 
 async function sendMessageToGemini(history) {
-  if (!GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY missing");
-  }
+  const ai = getGenAIClient();
 
   const systemPrompt = extractSystemPrompt(history);
   const contents = mapHistoryToGeminiContents(history);
@@ -43,61 +70,44 @@ Do not switch languages unless the user explicitly asks.
 Keep the entire response in that same language.
 `.trim();
 
-  const requestBody = {
-    contents,
-    generationConfig: {
-      temperature: 0.7,
-      topK: 32,
-      topP: 1,
-      maxOutputTokens: 512,
-    },
-  };
-
-  requestBody.systemInstruction = {
-    parts: [
-      {
-        text:
+  try {
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents,
+      config: {
+        temperature: 0.7,
+        topK: 32,
+        topP: 1,
+        maxOutputTokens: 512,
+        systemInstruction:
           systemPrompt.length > 0
             ? `${languageInstruction}\n\n${systemPrompt}`
             : languageInstruction,
       },
-    ],
-  };
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
-  try {
-    const response = await axios.post(url, requestBody, {
-      headers: {
-        "Content-Type": "application/json",
-      },
-      timeout: 30000,
     });
 
-    const reply =
-      response.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+    const reply = (response?.text || "").trim();
 
     if (!reply) {
       console.error(
-        "GEMINI EMPTY RESPONSE:",
-        JSON.stringify(response.data, null, 2)
+        "VERTEX AI EMPTY RESPONSE:",
+        JSON.stringify(response, null, 2)
       );
-      throw new Error("Empty response from Gemini");
+      throw new Error("Empty response from Vertex AI");
     }
 
     return reply;
   } catch (error) {
-    console.error("GEMINI STATUS:", error.response?.status);
+    console.error("VERTEX AI MESSAGE:", error.message);
     console.error(
-      "GEMINI DATA:",
-      JSON.stringify(error.response?.data, null, 2)
+      "VERTEX AI ERROR:",
+      JSON.stringify(error, Object.getOwnPropertyNames(error), 2)
     );
-    console.error("GEMINI MESSAGE:", error.message);
 
     throw new Error(
-      error.response?.data?.error?.message ||
-        error.message ||
-        "Gemini request failed"
+      error?.message ||
+        error?.error?.message ||
+        "Vertex AI request failed"
     );
   }
 }

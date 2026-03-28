@@ -1,24 +1,66 @@
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const { GoogleGenAI } = require("@google/genai");
+
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GOOGLE_CLOUD_PROJECT = process.env.GOOGLE_CLOUD_PROJECT;
+const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || "global";
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+
+let aiClient = null;
 
 function ensureGeminiConfig() {
-  if (!GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY missing");
+  if (!GOOGLE_CLOUD_PROJECT) {
+    throw new Error("GOOGLE_CLOUD_PROJECT missing");
+  }
+
+  if (!GOOGLE_CLOUD_LOCATION) {
+    throw new Error("GOOGLE_CLOUD_LOCATION missing");
   }
 }
 
-function getGeminiUrl() {
-  return `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+function getGenAIClient() {
+  if (aiClient) return aiClient;
+
+  ensureGeminiConfig();
+
+  const options = {
+    vertexai: true,
+    project: GOOGLE_CLOUD_PROJECT,
+    location: GOOGLE_CLOUD_LOCATION,
+  };
+
+  if (GOOGLE_API_KEY) {
+    options.apiKey = GOOGLE_API_KEY;
+  }
+
+
+  const fs = require("fs");
+const path = require("path");
+
+const credPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+try {
+  const resolvedPath = credPath ? path.resolve(credPath) : null;
+  console.log("GEMINI CREDENTIAL PATH:", resolvedPath || "YOK");
+
+  if (resolvedPath && fs.existsSync(resolvedPath)) {
+    const raw = fs.readFileSync(resolvedPath, "utf8");
+    const parsed = JSON.parse(raw);
+
+    console.log("GEMINI SERVICE ACCOUNT EMAIL:", parsed.client_email || "YOK");
+    console.log("GEMINI SERVICE ACCOUNT PROJECT:", parsed.project_id || "YOK");
+  } else {
+    console.log("GEMINI CREDENTIAL FILE NOT FOUND");
+  }
+} catch (err) {
+  console.log("GEMINI CREDENTIAL READ ERROR:", err.message);
 }
 
-function extractTextFromGeminiResponse(data) {
-  const parts = data?.candidates?.[0]?.content?.parts;
-  if (!Array.isArray(parts)) return "";
+  aiClient = new GoogleGenAI(options);
+  return aiClient;
+}
 
-  return parts
-    .map((part) => part?.text || "")
-    .join("")
-    .trim();
+function extractTextFromGeminiResponse(response) {
+  return (response?.text || "").toString().trim();
 }
 
 function clamp01(value, fallback = 0) {
@@ -238,51 +280,48 @@ async function callGemini({
   topP,
   topK,
   maxOutputTokens,
+  systemInstruction,
 }) {
-  ensureGeminiConfig();
+  const ai = getGenAIClient();
 
-  const generationConfig = {
+  const config = {
     temperature,
     responseMimeType,
   };
 
-  if (typeof topP === "number") generationConfig.topP = topP;
-  if (typeof topK === "number") generationConfig.topK = topK;
+  if (typeof topP === "number") config.topP = topP;
+  if (typeof topK === "number") config.topK = topK;
   if (typeof maxOutputTokens === "number") {
-    generationConfig.maxOutputTokens = maxOutputTokens;
+    config.maxOutputTokens = maxOutputTokens;
+  }
+  if (systemInstruction) {
+    config.systemInstruction = systemInstruction;
   }
 
-  const response = await fetch(getGeminiUrl(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-cache",
-      Pragma: "no-cache",
-    },
-    body: JSON.stringify({
+  let response;
+  try {
+    response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
       contents: [
         {
           role: "user",
           parts,
         },
       ],
-      generationConfig,
-    }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
+      config,
+    });
+  } catch (error) {
     const message =
-      data?.error?.message ||
-      `Gemini request failed with status ${response.status}`;
+      error?.message ||
+      error?.error?.message ||
+      "Vertex AI request failed";
     throw new Error(message);
   }
 
-  const text = extractTextFromGeminiResponse(data);
+  const text = extractTextFromGeminiResponse(response);
 
   if (!text) {
-    throw new Error("Gemini boş cevap döndü");
+    throw new Error("Vertex AI boş cevap döndü");
   }
 
   return text;
