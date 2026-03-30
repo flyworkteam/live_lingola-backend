@@ -1,5 +1,28 @@
 const sharp = require("sharp");
-const Tesseract = require("tesseract.js");
+const { createWorker } = require("tesseract.js");
+
+
+let worker = null;
+let currentLang = null;
+
+async function getWorker(lang) {
+  if (worker && currentLang === lang) {
+    return worker;
+  }
+
+  if (worker) {
+    await worker.terminate();
+    worker = null;
+  }
+
+  worker = await createWorker(lang, 1);
+
+  currentLang = lang;
+
+  console.log("🔥 OCR WORKER READY:", lang);
+
+  return worker;
+}
 
 function safeNumber(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -13,8 +36,9 @@ function clamp01(value, fallback = 0) {
   return n;
 }
 
+
 function mapToTesseractLanguage(language) {
-  const value = (language || "").toString().trim().toLowerCase();
+  const value = (language || "tr").toString().trim().toLowerCase();
 
   const languageMap = {
     tr: "tur",
@@ -22,32 +46,18 @@ function mapToTesseractLanguage(language) {
     en: "eng",
     english: "eng",
     de: "deu",
-    german: "deu",
     it: "ita",
-    italian: "ita",
     fr: "fra",
-    french: "fra",
     es: "spa",
-    spanish: "spa",
     ru: "rus",
-    russian: "rus",
     ko: "kor",
-    korean: "kor",
     hi: "hin",
-    hindi: "hin",
     ja: "jpn",
-    japanese: "jpn",
     pt: "por",
-    portuguese: "por",
     ar: "ara",
-    arabic: "ara",
-    auto: "eng+tur+deu+ita+fra+spa+rus+kor+hin+jpn+por+ara",
   };
 
-  return (
-    languageMap[value] ||
-    "eng+tur+deu+ita+fra+spa+rus+kor+hin+jpn+por+ara"
-  );
+  return languageMap[value] || "eng";
 }
 
 function normalizeText(text) {
@@ -121,29 +131,6 @@ function buildBlocksFromLines(lines, imageWidth, imageHeight) {
   );
 }
 
-function buildBlocksFromWords(words, imageWidth, imageHeight) {
-  const usefulWords = words.filter((word) => {
-    const text = normalizeText(word?.text || "");
-    const confidence = safeNumber(word?.confidence, 0);
-    return isUsefulText(text) && confidence >= 28;
-  });
-
-  return sortBlocks(
-    usefulWords
-      .map((word) => {
-        const box = normalizeBox(word, imageWidth, imageHeight);
-        return {
-          text: normalizeText(word.text),
-          x: clamp01(box.x, 0),
-          y: clamp01(box.y, 0),
-          width: clamp01(box.width, 0),
-          height: clamp01(box.height, 0),
-        };
-      })
-      .filter((item) => shouldKeepBlock(item.text, item.width, item.height))
-  );
-}
-
 function dedupeBlocks(blocks) {
   const seen = new Set();
   const out = [];
@@ -177,11 +164,7 @@ function removeHugeBrokenBlocks(blocks) {
     const tooWideAndSuspicious = width >= 0.7 && text.length > 80;
     const tooHugeArea = area >= 0.16 && text.length > 80;
 
-    if (tooWideAndSuspicious || tooHugeArea) {
-      return false;
-    }
-
-    return true;
+    return !(tooWideAndSuspicious || tooHugeArea);
   });
 }
 
@@ -199,73 +182,36 @@ function removeTinyNoiseBlocks(blocks) {
   });
 }
 
-function scoreBlocks(blocks, rawText) {
-  const textLength = blocks.reduce((sum, item) => sum + item.text.length, 0);
-  const blockBonus = Math.min(blocks.length, 60) * 10;
-  const rawBonus = Math.min(normalizeText(rawText).length, 300);
-  return textLength + blockBonus + rawBonus;
-}
-
-async function buildPreprocessedVariants(buffer) {
-  const base = sharp(buffer).rotate();
-  const meta = await base.metadata();
-
-  const width = meta.width || 0;
-  const shouldUpscale = width > 0 && width < 1800;
-  const resizeWidth = shouldUpscale ? Math.min(2200, width * 2) : null;
-
-  const original = await base.jpeg({ quality: 95 }).toBuffer();
-
-  const enhanced = await sharp(buffer)
+async function preprocessImage(buffer) {
+  return await sharp(buffer)
     .rotate()
-    .resize(
-      resizeWidth ? { width: resizeWidth, withoutEnlargement: false } : {}
-    )
+    .resize({ width: 1100, withoutEnlargement: false })
     .grayscale()
     .normalize()
-    .sharpen({ sigma: 1.0, m1: 1, m2: 2 })
-    .jpeg({ quality: 95 })
+    .jpeg({ quality: 85 })
     .toBuffer();
-
-  const thresholded = await sharp(buffer)
-    .rotate()
-    .resize(
-      resizeWidth ? { width: resizeWidth, withoutEnlargement: false } : {}
-    )
-    .grayscale()
-    .normalize()
-    .threshold(185)
-    .jpeg({ quality: 95 })
-    .toBuffer();
-
-  return [
-    { label: "original", buffer: original },
-    { label: "enhanced", buffer: enhanced },
-    { label: "thresholded", buffer: thresholded },
-  ];
 }
 
 async function runOcr(buffer, language) {
   const tesseractLanguage = mapToTesseractLanguage(language);
 
-  const result = await Tesseract.recognize(buffer, tesseractLanguage, {
-    logger: () => {},
+  const worker = await getWorker(tesseractLanguage);
+
+  const { data } = await worker.recognize(buffer, {
+    tessedit_pageseg_mode: 6,
+    tessedit_ocr_engine_mode: 1,
+    preserve_interword_spaces: 1,
   });
 
-  const data = result?.data || {};
   const rawText = normalizeText(data?.text || "");
-  const words = Array.isArray(data?.words) ? data.words : [];
   const lines = Array.isArray(data?.lines) ? data.lines : [];
   const imageWidth = data?.imageSize?.width || 1;
   const imageHeight = data?.imageSize?.height || 1;
 
   let blocks = [];
 
-  if (words.length > 0) {
-    blocks = buildBlocksFromWords(words, imageWidth, imageHeight);
-  }
 
-  if (blocks.length === 0 && lines.length > 0) {
+  if (lines.length > 0) {
     blocks = buildBlocksFromLines(lines, imageWidth, imageHeight);
   }
 
@@ -277,71 +223,42 @@ async function runOcr(buffer, language) {
     rawText,
     blocks,
     lineCount: lines.length,
-    wordCount: words.length,
-    tesseractLanguage,
-    score: scoreBlocks(blocks, rawText),
   };
 }
 
-async function detectText(buffer, language = "auto") {
-  const variants = await buildPreprocessedVariants(buffer);
+async function detectText(buffer, language = "tr") {
+  try {
+    const processed = await preprocessImage(buffer);
+    const result = await runOcr(processed, language);
 
-  let best = null;
-  const languagesToTry = [];
+    console.log("OCR FAST MODE");
+    console.log("LANG:", language);
+    console.log("BLOCK COUNT:", result.blocks.length);
 
-  if (language && language !== "auto") {
-    languagesToTry.push(language);
-  }
-  languagesToTry.push("auto");
+    return {
+      rawText: result.rawText,
+      blocks: result.blocks,
+      variant: "fast",
+      usedLanguage: language,
+    };
+  } catch (error) {
+    console.error("OCR ERROR:", error);
 
-  for (const candidateLanguage of languagesToTry) {
-    for (const variant of variants) {
-      try {
-        const result = await runOcr(variant.buffer, candidateLanguage);
-
-        console.log("OCR VARIANT:", variant.label);
-        console.log("OCR LANGUAGE:", candidateLanguage);
-        console.log("OCR TESSERACT LANGUAGE:", result.tesseractLanguage);
-        console.log("OCR RAW TEXT:", result.rawText);
-        console.log("OCR LINE COUNT:", result.lineCount);
-        console.log("OCR WORD COUNT:", result.wordCount);
-        console.log("OCR BLOCK COUNT:", result.blocks.length);
-        console.log("OCR SCORE:", result.score);
-        console.log("OCR BLOCKS:", result.blocks);
-
-        if (!best || result.score > best.score) {
-          best = {
-            ...result,
-            variant: variant.label,
-            usedLanguage: candidateLanguage,
-          };
-        }
-      } catch (error) {
-        console.error(`OCR ERROR [${candidateLanguage}/${variant.label}]:`, error);
-      }
-    }
-
-    if (best && best.blocks.length > 0) {
-      break;
-    }
-  }
-
-  if (!best) {
     return {
       rawText: "",
       blocks: [],
-      variant: "none",
+      variant: "error",
     };
   }
+}
 
-  return {
-    rawText: best.rawText,
-    blocks: best.blocks,
-    variant: best.variant,
-    usedLanguage: best.usedLanguage,
-  };
+async function preloadOcr(language = "tr") {
+  const tesseractLanguage = mapToTesseractLanguage(language);
+  await getWorker(tesseractLanguage);
+  console.log("🚀 OCR PRELOADED:", tesseractLanguage);
 }
 
 module.exports = {
   detectText,
+  preloadOcr,
 };

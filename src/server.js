@@ -12,9 +12,12 @@ const notificationRoutes = require("./routes/notification.routes");
 const subscriptionRoutes = require("./routes/subscription.routes");
 const chatRoutes = require("./routes/chat.routes");
 
-// LOG İÇİN EKLENDİ
+
 const logRoutes = require("./routes/log.routes");
 const { createLog } = require("./services/log.service");
+
+
+const { preloadOcr } = require("./services/ocr.service");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -135,7 +138,7 @@ app.use("/notifications", notificationRoutes);
 app.use("/subscription", subscriptionRoutes);
 app.use("/chat", chatRoutes);
 
-// LOG ROUTE EKLENDİ
+
 app.use("/logs", logRoutes);
 
 app.use(async (req, res) => {
@@ -207,10 +210,19 @@ function getLocalIpAddress() {
   return "127.0.0.1";
 }
 
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, "0.0.0.0", async () => {
   const localIp = getLocalIpAddress();
 
   console.log(`API running on:`);
   console.log(`- Local:   http://127.0.0.1:${PORT}`);
   console.log(`- Network: http://${localIp}:${PORT}`);
+
+
+  try {
+    await preloadOcr("tr");
+    await preloadOcr("en");
+    console.log("🚀 OCR PRELOAD COMPLETED");
+  } catch (e) {
+    console.error("OCR PRELOAD ERROR:", e);
+  }
 });
