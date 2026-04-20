@@ -42,7 +42,6 @@ function clamp01(value, fallback = 0) {
   if (n > 1) return 1;
   return n;
 }
-
 function normalizePhotoBlock(block) {
   const sourceText = (block?.source_text || block?.text || "")
     .toString()
@@ -64,7 +63,6 @@ function cleanupPhotoBlocks(blocks) {
     (Array.isArray(blocks) ? blocks : []).map(normalizePhotoBlock)
   );
 }
-
 const translateText = async (req, res) => {
   try {
     const {
@@ -82,13 +80,6 @@ const translateText = async (req, res) => {
       force_regenerate,
     } = req.body || {};
 
-    if (!firebase_uid) {
-      return res.status(400).json({
-        ok: false,
-        error: "firebase_uid zorunlu",
-      });
-    }
-
     if (!source_text || !source_language || !target_language) {
       return res.status(400).json({
         ok: false,
@@ -96,14 +87,9 @@ const translateText = async (req, res) => {
       });
     }
 
-    const userId = await getUserIdByFirebaseUid(firebase_uid);
-
-    if (!userId) {
-      return res.status(404).json({
-        ok: false,
-        error: "User not found",
-      });
-    }
+    const userId = firebase_uid
+      ? await getUserIdByFirebaseUid(firebase_uid)
+      : null;
 
     const translatedTextValue =
       translated_text && translated_text.toString().trim() !== ""
@@ -121,8 +107,7 @@ const translateText = async (req, res) => {
           );
 
     let translationId = null;
-
-    if (isTruthySave(save_to_history)) {
+ if (isTruthySave(save_to_history) && userId) {
       const [result] = await pool.query(
         `
         INSERT INTO translations (
@@ -149,7 +134,7 @@ const translateText = async (req, res) => {
       );
 
       translationId = result.insertId;
-    }
+  }
 
     return res.json({
       ok: true,
@@ -164,7 +149,6 @@ const translateText = async (req, res) => {
     });
   }
 };
-
 const generateTextExamples = async (req, res) => {
   try {
     const {
@@ -223,7 +207,6 @@ const translatePhoto = async (req, res) => {
           }
         : null
     );
-
     const {
       firebase_uid,
       source_language,
@@ -231,13 +214,6 @@ const translatePhoto = async (req, res) => {
       save_to_history,
       expert,
     } = req.body || {};
-
-    if (!firebase_uid) {
-      return res.status(400).json({
-        ok: false,
-        error: "firebase_uid zorunlu",
-      });
-    }
 
     if (!req.file) {
       return res.status(400).json({
@@ -253,17 +229,12 @@ const translatePhoto = async (req, res) => {
       });
     }
 
-    const userId = await getUserIdByFirebaseUid(firebase_uid);
-
-    if (!userId) {
-      return res.status(404).json({
-        ok: false,
-        error: "User not found",
-      });
-    }
+    const userId = firebase_uid
+      ? await getUserIdByFirebaseUid(firebase_uid)
+      : null;
 
     let normalizedBuffer;
-    try {
+ try {
       normalizedBuffer = await sharp(req.file.buffer)
         .rotate()
         .resize({ width: 1400, withoutEnlargement: true })
@@ -299,7 +270,6 @@ const translatePhoto = async (req, res) => {
 
       if (!cleanedOcrBlocks.length) {
         const retryOcrResult = await detectText(normalizedBuffer, "auto");
-
         const retryRawBlocks = Array.isArray(retryOcrResult?.blocks)
           ? retryOcrResult.blocks.map((b) => ({
               source_text: (b?.text || "").toString().trim(),
@@ -327,8 +297,7 @@ const translatePhoto = async (req, res) => {
       console.log("PHOTO OCR CLEAN BLOCKS:", cleanedOcrBlocks);
 
       sourceTextValue = (ocrResult?.rawText || "").toString().trim();
-
-      if (cleanedOcrBlocks.length > 0) {
+ if (cleanedOcrBlocks.length > 0) {
         const translated = await translatePhotoBlocksWithGemini({
           blocks: cleanedOcrBlocks,
           sourceLanguage: source_language,
@@ -379,7 +348,6 @@ const translatePhoto = async (req, res) => {
       console.error("PHOTO PIPELINE ERROR:", e);
 
       processingMode = "gemini_fallback_error_path";
-
       const geminiPhoto = await translatePhotoWithGemini({
         imageBase64: normalizedBuffer.toString("base64"),
         mimeType: "image/jpeg",
@@ -412,10 +380,9 @@ const translatePhoto = async (req, res) => {
     } catch (e) {
       console.error("IMAGE RENDER ERROR:", e);
     }
+       let translationId = null;
 
-    let translationId = null;
-
-    if (isTruthySave(save_to_history)) {
+    if (isTruthySave(save_to_history) && userId) {
       const [result] = await pool.query(
         `
         INSERT INTO translations (
@@ -440,7 +407,6 @@ const translatePhoto = async (req, res) => {
           0,
         ]
       );
-
       translationId = result.insertId;
     }
 
@@ -497,7 +463,7 @@ const toggleFavorite = async (req, res) => {
       WHERE id = ?
       LIMIT 1
       `,
-      [translation_id]
+     [translation_id]
     );
 
     return res.json({
@@ -547,7 +513,6 @@ const getHistory = async (req, res) => {
     });
   }
 };
-
 const getFavorites = async (req, res) => {
   try {
     const { firebaseUid } = req.params;
@@ -581,7 +546,7 @@ const getFavorites = async (req, res) => {
       error: error.message,
     });
   }
-};
+  };
 
 const getFrequentlyUsed = async (req, res) => {
   try {
@@ -607,7 +572,7 @@ const getFrequentlyUsed = async (req, res) => {
       [userId]
     );
 
-    return res.json({
+ return res.json({
       ok: true,
       items: rows,
     });
@@ -619,7 +584,6 @@ const getFrequentlyUsed = async (req, res) => {
     });
   }
 };
-
 const clearHistory = async (req, res) => {
   try {
     const { firebaseUid } = req.params;
@@ -651,7 +615,6 @@ const clearHistory = async (req, res) => {
     });
   }
 };
-
 const clearFavorites = async (req, res) => {
   try {
     const { firebaseUid } = req.params;
@@ -684,7 +647,6 @@ const clearFavorites = async (req, res) => {
     });
   }
 };
-
 module.exports = {
   translateText,
   generateTextExamples,
@@ -696,3 +658,7 @@ module.exports = {
   clearHistory,
   clearFavorites,
 };
+
+
+
+
